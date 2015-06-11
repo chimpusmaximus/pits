@@ -13,6 +13,7 @@
 #include <wiringPiSPI.h>
 
 #include "gps.h"
+#include "misc.h"
 
 struct TBMP
 {
@@ -30,38 +31,14 @@ struct TBMP
 	short Md;
 };
 
-void bmp085Calibration(struct TBMP *bmp);
+int bmp085Calibration(struct TBMP *bmp);
 double bmp085GetTemperature(struct TBMP *bmp);
 double bmp085GetPressure(struct TBMP *bmp, double Temperature);
-short bmp085ReadInt(short fd, unsigned char address);
+int bmp085ReadInt(short fd, unsigned char address);
 unsigned short bmp085ReadUT(short fd);
 double bmp085ReadUP(short fd);
 
 #define BMP085_ADDRESS 0x77  		// I2C address of BMP085 pressure sensor
-
-
-
-short open_i2c(int address)
-{
-	short fd;
-	char i2c_dev[16];
-
-	sprintf(i2c_dev, "/dev/i2c-%d", piBoardRev()-1);
-
-	if ((fd = open(i2c_dev, O_RDWR)) < 0)
-	{                                        // Open port for reading and writing
-		printf("Failed to open i2c port\n");
-		return 0;
-	}
-
-	if (ioctl(fd, I2C_SLAVE, address) < 0)                                 // Set the port options and set the address of the device we wish to speak to
-	{
-		printf("Unable to get bus access to talk to slave on address %02Xh\n", address);
-		return 0;
-	}
-
-	return fd;
-}
 
 
 void *BMP085Loop(void *some_void_ptr)
@@ -74,8 +51,15 @@ void *BMP085Loop(void *some_void_ptr)
 	// Initialise BMP085
 	if (bmp.fd = open_i2c(BMP085_ADDRESS))
 	{
-		bmp085Calibration(&bmp);
+		int NoBMP;
+		
+		NoBMP = bmp085Calibration(&bmp);
 		close(bmp.fd);
+		
+		if (NoBMP)
+		{
+			return 0;
+		}
 	}
 	else
 	{
@@ -86,10 +70,10 @@ void *BMP085Loop(void *some_void_ptr)
 	{
 		if (bmp.fd = open_i2c(BMP085_ADDRESS))
 		{
-			GPS->ExternalTemperature = bmp085GetTemperature(&bmp);
-			GPS->Pressure = bmp085GetPressure(&bmp, GPS->ExternalTemperature);
+			GPS->BMP180Temperature = bmp085GetTemperature(&bmp);
+			GPS->Pressure = bmp085GetPressure(&bmp, GPS->BMP180Temperature);
 
-			// printf("Temperature is %5.2lf\n", GPS->ExternalTemperature);
+			// printf("Temperature is %5.2lf\n", GPS->BMP180Temperature);
 			// printf("Pressure is %5.2lf\n", GPS->Pressure);
 
 			close(bmp.fd);
@@ -101,8 +85,13 @@ void *BMP085Loop(void *some_void_ptr)
     return 0;
 }
 
-void bmp085Calibration(struct TBMP *bmp)
+int bmp085Calibration(struct TBMP *bmp)
 {
+	if (bmp085ReadInt(bmp->fd, 0xAA) < 0)
+	{
+		return 1;
+	}
+	
 	bmp->ac1 = bmp085ReadInt(bmp->fd, 0xAA);
 	bmp->ac2 = bmp085ReadInt(bmp->fd, 0xAC);
 	bmp->ac3 = bmp085ReadInt(bmp->fd, 0xAE);
@@ -114,6 +103,8 @@ void bmp085Calibration(struct TBMP *bmp)
 	bmp->Mb = bmp085ReadInt(bmp->fd, 0xBA);
 	bmp->Mc = bmp085ReadInt(bmp->fd, 0xBC);
 	bmp->Md = bmp085ReadInt(bmp->fd, 0xBE);
+	
+	return 0;
 
 	// printf ("Values are %d %d %d %u %u %u %d %d %d %d %d\n", ac1, ac2, ac3, ac4, ac5, ac6, B1, B2, Mb, Mc, Md);
 }
@@ -171,33 +162,10 @@ double bmp085GetPressure(struct TBMP *bmp, double Temperature)
 	return P;
 }
 
-// Read 1 byte from the BMP085 at 'address'
-/*
-unsigned char bmp085Read(unsigned char address)
-{
-	unsigned char buf[10];
-
-	buf[0] = address;
-	if ((write(fd, buf, 1)) != 1) {								// Send register we want to read from	
-		printf("Error writing to i2c slave\n");
-		exit(1);
-	}
-
-	if (read(fd, buf, 1) != 1) {								// Read back data into buf[]
-		printf("Unable to read from slave\n");
-		exit(1);
-	}
-
-	// printf ("Device address %d gives %02X\n", address, buf[0]);
-
-	return buf[0];
-}
-*/
-
 // Read 2 bytes from the BMP085
 // First byte will be from 'address'
 // Second byte will be from 'address'+1
-short bmp085ReadInt(short fd, unsigned char address)
+int bmp085ReadInt(short fd, unsigned char address)
 {
 	unsigned char buf[10];
 
@@ -205,12 +173,12 @@ short bmp085ReadInt(short fd, unsigned char address)
 
 	if ((write(fd, buf, 1)) != 1) {								// Send register we want to read from	
 		printf("Error writing to i2c slave\n");
-		exit(1);
+		return -1;
 	}
 	
 	if (read(fd, buf, 2) != 2) {								// Read back data into buf[]
 		printf("Unable to read from slave\n");
-		exit(1);
+		return -1;
 	}
 
 	return (short) buf[0]<<8 | buf[1];
@@ -228,9 +196,10 @@ unsigned short bmp085ReadUT(short fd)
 	buf[0] = 0xF4;
 	buf[1] = 0x2E;
 
-	if ((write(fd, buf, 2)) != 2) {								// Send register we want to read from	
+	if ((write(fd, buf, 2)) != 2)
+	{
 		printf("Error writing to i2c slave\n");
-		exit(1);
+		return 0;
 	}
 
 	usleep(5000);
@@ -255,23 +224,26 @@ double bmp085ReadUP(short fd)
 	buf[0] = 0xF4;
 	buf[1] = 0x34;
 
-	if ((write(fd, buf, 2)) != 2) {								// Send register we want to read from	
+	if ((write(fd, buf, 2)) != 2)
+	{
 		printf("Error writing to i2c slave\n");
-		exit(1);
+		return 0;
 	}
 
 	usleep(3000);
 
 	buf[0] = 0xF6;
 
-	if ((write(fd, buf, 1)) != 1) {								// Send register we want to read from	
+	if ((write(fd, buf, 1)) != 1)
+	{
 		printf("Error writing to i2c slave\n");
-		exit(1);
+		return 0;
 	}
 	
-	if (read(fd, buf, 3) != 3) {								// Read back data into buf[]
+	if (read(fd, buf, 3) != 3)
+	{
 		printf("Unable to read from slave\n");
-		exit(1);
+		return 0;
 	}
 
 	msb = buf[0];

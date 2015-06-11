@@ -11,13 +11,8 @@
 | 3 - Reads the current battery voltage                             |
 | 4 - Reads the current GPS position                                |
 | 5 - Builds a telemetry sentence to transmit                       |
-| 6 - Sends it to the MTX2/NTX2B radio transmitteR                  |
+| 6 - Sends it to the MTX2/NTX2B radio transmitter                  |
 | 7 - repeats steps 2-6                                             |
-|                                                                   |
-| 12/10/14 - Modifications for PITS+ V0.7 board and B+              |
-| 11/11/14 - Modifications for PITS+ V2.0 board and A+/B+           |
-| 19/12/14 - New GPS code.  Frequency calcs.  Image filenames       |
-| 20/12/14 - Added APRS code.  ** Not yet flight tested **          |
 |                                                                   |
 \------------------------------------------------------------------*/
 
@@ -33,18 +28,21 @@
 #include <termios.h> 	// POSIX terminal control definitions
 #include <stdint.h>
 #include <stdlib.h>
+#include <dirent.h>
 #include <math.h>
 #include <pthread.h>
 #include <wiringPi.h>
 #include "gps.h"
 #include "DS18B20.h"
 #include "adc.h"
+#include "adc_i2c.h"
 #include "misc.h"
 #include "snapper.h"
 #include "led.h"
 #include "bmp085.h"
 #include "aprs.h"
 #include "lora.h"
+#include "prediction.h"
 
 struct TConfig Config;
 
@@ -52,17 +50,18 @@ struct TConfig Config;
 #define NTX2B_ENABLE	0
 #define UBLOX_ENABLE	2
 
+FILE *ImageFP;
+int Records, FileNumber;
 struct termios options;
 char *SSDVFolder="/home/pi/pits/tracker/images";
  
 void BuildSentence(char *TxLine, int SentenceCounter, struct TGPS *GPS)
 {
-    int Count, i, j;
+    int i, j;
     unsigned char c;
-    unsigned int CRC, xPolynomial;
-	char TimeBuffer1[12], TimeBuffer2[10], ExtraFields1[20], ExtraFields2[20];
+	char TimeBuffer1[12], TimeBuffer2[10], ExtraFields1[20], ExtraFields2[20], ExtraFields3[20];
 	
-	sprintf(TimeBuffer1, "%06ld", GPS->Time);
+	sprintf(TimeBuffer1, "%06.0f", GPS->Time);
 	TimeBuffer2[0] = TimeBuffer1[0];
 	TimeBuffer2[1] = TimeBuffer1[1];
 	TimeBuffer2[2] = ':';
@@ -75,18 +74,24 @@ void BuildSentence(char *TxLine, int SentenceCounter, struct TGPS *GPS)
 	
 	ExtraFields1[0] = '\0';
 	ExtraFields2[0] = '\0';
+	ExtraFields3[0] = '\0';
 	
 	if (NewBoard())
 	{
-		sprintf(ExtraFields1, ",%u", GPS->BoardCurrent);
+		sprintf(ExtraFields1, ",%.0f", GPS->BoardCurrent * 1000);
 	}
 	
 	if (Config.EnableBMP085)
 	{
-		sprintf(ExtraFields2, ",%.1f,%.0f", GPS->ExternalTemperature, GPS->Pressure);
+		sprintf(ExtraFields2, ",%.1f,%.0f", GPS->BMP180Temperature, GPS->Pressure);
 	}
 	
-    sprintf(TxLine, "$$%s,%d,%s,%7.5lf,%7.5lf,%05.5u,%d,%d,%d,%3.1f,%3.1f%s",
+	if (GPS->DS18B20Count > 1)
+	{
+		sprintf(ExtraFields3, ",%3.1f", GPS->DS18B20Temperature[Config.ExternalDS18B20]);
+	}
+	
+    sprintf(TxLine, "$$%s,%d,%s,%7.5lf,%7.5lf,%05.5u,%d,%d,%d,%3.1f,%3.1f%s%s%s",
             Config.Channels[RTTY_CHANNEL].PayloadID,
             SentenceCounter,
 			TimeBuffer2,
@@ -96,116 +101,17 @@ void BuildSentence(char *TxLine, int SentenceCounter, struct TGPS *GPS)
 			(GPS->Speed * 13) / 7,
 			GPS->Direction,
 			GPS->Satellites,            
-            GPS->InternalTemperature,
+            GPS->DS18B20Temperature[1-Config.ExternalDS18B20],
             GPS->BatteryVoltage,
 			ExtraFields1,
-			ExtraFields2);
+			ExtraFields2,
+			ExtraFields3);
 
-    Count = strlen(TxLine);
-
-    CRC = 0xffff;           // Seed
-    xPolynomial = 0x1021;
-   
-     for (i = 2; i < Count; i++)
-     {   // For speed, repeat calculation instead of looping for each bit
-        CRC ^= (((unsigned int)TxLine[i]) << 8);
-        for (j=0; j<8; j++)
-        {
-            if (CRC & 0x8000)
-                CRC = (CRC << 1) ^ 0x1021;
-            else
-                CRC <<= 1;
-        }
-     }
-
-    TxLine[Count++] = '*';
-    TxLine[Count++] = Hex((CRC >> 12) & 15);
-    TxLine[Count++] = Hex((CRC >> 8) & 15);
-    TxLine[Count++] = Hex((CRC >> 4) & 15);
-    TxLine[Count++] = Hex(CRC & 15);
-	TxLine[Count++] = '\n';  
-	TxLine[Count++] = '\0';  
-
+	AppendCRC(TxLine);
+			
     printf("RTTY: %s", TxLine);
 }
 
-
-void ReadString(FILE *fp, char *keyword, int Channel, char *Result, int Length, int NeedValue)
-{
-	char line[100], FullKeyWord[64], *token, *value;
- 
-	if (Channel >= 0)
-	{
-		sprintf(FullKeyWord, "%s_%d", keyword, Channel);
-	}
-	else
-	{
-		strcpy(FullKeyWord, keyword);
-	}
- 
-	fseek(fp, 0, SEEK_SET);
-	*Result = '\0';
-
-	while (fgets(line, sizeof(line), fp) != NULL)
-	{
-		line[strcspn(line, "\r")] = '\0';			// Ignore any CR (in case someone has edited the file from Windows with notepad)
-		
-		token = strtok(line, "=");
-		if (strcasecmp(FullKeyWord, token) == 0)
-		{
-			value = strtok(NULL, "\n");
-			strcpy(Result, value);
-			return;
-		}
-	}
-
-	if (NeedValue)
-	{
-		printf("Missing value for '%s' in configuration file\n", keyword);
-		exit(1);
-	}
-}
-
-int ReadInteger(FILE *fp, char *keyword, int Channel, int NeedValue, int DefaultValue)
-{
-	char Temp[64];
-	
-	ReadString(fp, keyword, Channel, Temp, sizeof(Temp), NeedValue);
-
-	if (Temp[0])
-	{
-		return atoi(Temp);
-	}
-	
-	return DefaultValue;
-}
-
-int ReadBoolean(FILE *fp, char *keyword, int Channel, int NeedValue, int *Result)
-{
-	char Temp[32];
-
-	ReadString(fp, keyword, Channel, Temp, sizeof(Temp), NeedValue);
-
-	if (*Temp)
-	{
-		*Result = (*Temp == '1') || (*Temp == 'Y') || (*Temp == 'y') || (*Temp == 't') || (*Temp == 'T');
-	}
-	else
-	{
-		*Result = 0;
-	}
-	
-	return *Temp;
-}
-
-int ReadBooleanFromString(FILE *fp, char *keyword, char *searchword)
-{
-	char Temp[100];
-
-	ReadString(fp, keyword, -1, Temp, sizeof(Temp), 0);
-
-	if (strcasestr(Temp, searchword)) return 1; else return 0;
-}
 
 speed_t BaudToSpeed(int baud)
 {
@@ -225,13 +131,10 @@ speed_t BaudToSpeed(int baud)
 
 void LoadConfigFile(struct TConfig *Config)
 {
-	const char *LoRaModes[5] = {"slow", "SSDV", "repeater", "turbo", "TurboX"};
 	FILE *fp;
 	int BaudRate, Channel;
 	char *filename = "/boot/pisky.txt";
 
-	Config->GPSDevice[0] = '\0';
-	
 	if ((fp = fopen(filename, "r")) == NULL)
 	{
 		printf("\nFailed to open config file %s (error %d - %s).\nPlease check that it exists and has read permission.\n", filename, errno, strerror(errno));
@@ -269,7 +172,7 @@ void LoadConfigFile(struct TConfig *Config)
 		}
 		printf ("Radio baud rate = %d\n", BaudRate);
 	}
-
+	
 	Config->EnableGPSLogging = ReadBooleanFromString(fp, "logging", "GPS");
 	if (Config->EnableGPSLogging) printf("GPS Logging enabled\n");
 
@@ -281,7 +184,8 @@ void LoadConfigFile(struct TConfig *Config)
 	{
 		printf("BMP085 Enabled\n");
 	}
-
+	
+	Config->ExternalDS18B20 = ReadInteger(fp, "external_temperature", -1, 0, 1);
 
 	ReadBoolean(fp, "camera", -1, 0, &(Config->Camera));
 	printf ("Camera %s\n", Config->Camera ? "Enabled" : "Disabled");
@@ -289,7 +193,7 @@ void LoadConfigFile(struct TConfig *Config)
 	{
 		Config->SSDVHigh = ReadInteger(fp, "high", -1, 0, 2000);
 		printf ("Image size changes at %dm\n", Config->SSDVHigh);
-	
+		
 		Config->Channels[0].ImageWidthWhenLow = ReadInteger(fp, "low_width", -1, 0, 320);
 		Config->Channels[0].ImageHeightWhenLow = ReadInteger(fp, "low_height", -1, 0, 240);
 		printf ("RTTY Low image size %d x %d pixels\n", Config->Channels[0].ImageWidthWhenLow, Config->Channels[0].ImageHeightWhenLow);
@@ -304,14 +208,25 @@ void LoadConfigFile(struct TConfig *Config)
 		Config->Channels[0].ImagePeriod = ReadInteger(fp, "image_period", -1, 0, 60);
 		printf ("RTTY: %d seconds between photographs\n", Config->Channels[0].ImagePeriod);
 	}
-	
-	ReadString(fp, "GPS_Serial", -1, Config->GPSDevice, sizeof(Config->GPSDevice), 0);
+
+	Config->GPSSource[0] = '\0';
+	ReadString(fp, "gps_source", -1, Config->GPSSource, sizeof(Config->GPSSource), 0);
+
+	// Landing prediction
+	Config->EnableLandingPrediction = 0;
+	ReadBoolean(fp, "landing_prediction", -1, 0, &(Config->EnableLandingPrediction));
+	if (Config->EnableLandingPrediction)
+	{
+		Config->cd_area = ReadFloat(fp, "cd_area", -1, 0, 0.66);
+		Config->payload_weight = ReadFloat(fp, "payload_weight", -1, 0, 0.66);
+		ReadString(fp, "prediction_id", -1, Config->PredictionID, sizeof(Config->PredictionID), 0);
+	}
 	
 	// I2C overrides.  Only needed for users own boards, or for some of our prototypes
 	if (ReadInteger(fp, "SDA", -1, 0, 0))
 	{
-		printf ("I2C SDA overridden to %d\n", Config->SDA);
 		Config->SDA = ReadInteger(fp, "SDA", -1, 0, 0);
+		printf ("I2C SDA overridden to %d\n", Config->SDA);
 	}
 
 	if (ReadInteger(fp, "SCL", -1, 0, 0))
@@ -319,243 +234,10 @@ void LoadConfigFile(struct TConfig *Config)
 		Config->SCL = ReadInteger(fp, "SCL", -1, 0, 0);
 		printf ("I2C SCL overridden to %d\n", Config->SCL);
 	}
+
+	LoadAPRSConfig(fp, Config);
 	
-	// APRS settings
-	ReadString(fp, "APRS_Callsign", -1, Config->APRS_Callsign, sizeof(Config->APRS_Callsign), 0);
-	Config->APRS_ID = ReadInteger(fp, "APRS_ID", -1, 0, 0);
-	Config->APRS_Period = ReadInteger(fp, "APRS_Period", -1, 0, 0);
-	if (*(Config->APRS_Callsign) && Config->APRS_ID && Config->APRS_Period)
-	{
-		printf("APRS enabled for callsign %s:%d every %d minute%s\n", Config->APRS_Callsign, Config->APRS_ID, Config->APRS_Period, Config->APRS_Period > 1 ? "s" : "");
-	}
-	
-	// LORA
-	if (NewBoard())
-	{
-		// For dual card.  These are for the second prototype (earlier one will need overrides)
-
-		Config->LoRaDevices[0].DIO0 = 6;
-		Config->LoRaDevices[0].DIO5 = 5;
-		
-		Config->LoRaDevices[1].DIO0 = 31;
-		Config->LoRaDevices[1].DIO5 = 26;
-	}
-	else
-	{
-		Config->LoRaDevices[0].DIO0 = 6;
-		Config->LoRaDevices[0].DIO5 = 5;
-		
-		Config->LoRaDevices[1].DIO0 = 3;
-		Config->LoRaDevices[1].DIO5 = 4;
-	}
-
-	Config->LoRaDevices[0].InUse = 0;
-	Config->LoRaDevices[1].InUse = 0;
-	
-	Config->LoRaDevices[0].LoRaMode = lmIdle;
-	Config->LoRaDevices[1].LoRaMode = lmIdle;
-
-
-	for (Channel=0; Channel<=1; Channel++)
-	{
-		int Temp;
-		char TempString[64];
-		
-		strcpy(Config->LoRaDevices[Channel].LastCommand, "None");
-		
-		Config->LoRaDevices[Channel].Frequency[0] = '\0';
-		ReadString(fp, "LORA_Frequency", Channel, Config->LoRaDevices[Channel].Frequency, sizeof(Config->LoRaDevices[Channel].Frequency), 0);
-		if (Config->LoRaDevices[Channel].Frequency[0])
-		{
-			printf("LORA%d frequency set to %s\n", Channel, Config->LoRaDevices[Channel].Frequency);
-			Config->LoRaDevices[Channel].InUse = 1;
-			Config->Channels[LORA_CHANNEL+Channel].Enabled = 1;
-
-			ReadString(fp, "LORA_Payload", Channel, Config->Channels[LORA_CHANNEL+Channel].PayloadID, sizeof(Config->Channels[LORA_CHANNEL+Channel].PayloadID), 1);
-			printf ("LORA%d Payload ID = '%s'\n", Channel, Config->Channels[LORA_CHANNEL+Channel].PayloadID);
-			
-			Config->LoRaDevices[Channel].SpeedMode = ReadInteger(fp, "LORA_Mode", Channel, 0, 0);
-			printf("LORA%d %s mode\n", Channel, LoRaModes[Config->LoRaDevices[Channel].SpeedMode]);
-
-			// DIO0 / DIO5 overrides
-			Config->LoRaDevices[Channel].DIO0 = ReadInteger(fp, "LORA_DIO0", Channel, 0, Config->LoRaDevices[Channel].DIO0);
-
-			Config->LoRaDevices[Channel].DIO5 = ReadInteger(fp, "LORA_DIO5", Channel, 0, Config->LoRaDevices[Channel].DIO5);
-
-			printf("LORA%d DIO0=%d DIO5=%d\n", Channel, Config->LoRaDevices[Channel].DIO0, Config->LoRaDevices[Channel].DIO5);
-			
-			Config->Channels[LORA_CHANNEL+Channel].ImageWidthWhenLow = ReadInteger(fp, "LORA_low_width", Channel, 0, 320);
-			Config->Channels[LORA_CHANNEL+Channel].ImageHeightWhenLow = ReadInteger(fp, "LORA_low_height", Channel, 0, 240);
-			printf ("LORA%d Low image size %d x %d pixels\n", Channel, Config->Channels[LORA_CHANNEL+Channel].ImageWidthWhenLow, Config->Channels[LORA_CHANNEL+Channel].ImageHeightWhenLow);
-			
-			Config->Channels[LORA_CHANNEL+Channel].ImageWidthWhenHigh = ReadInteger(fp, "LORA_high_width", Channel, 0, 640);
-			Config->Channels[LORA_CHANNEL+Channel].ImageHeightWhenHigh = ReadInteger(fp, "LORA_high_height", Channel, 0, 480);
-			printf ("LORA%d High image size %d x %d pixels\n", Channel, Config->Channels[LORA_CHANNEL+Channel].ImageWidthWhenHigh, Config->Channels[LORA_CHANNEL+Channel].ImageHeightWhenHigh);
-
-			Config->Channels[LORA_CHANNEL+Channel].ImagePackets = ReadInteger(fp, "LORA_image_packets", Channel, 0, 4);
-			printf ("LORA%d: 1 Telemetry packet every %d image packets\n", Channel, Config->Channels[LORA_CHANNEL+Channel].ImagePackets);
-			
-			Config->Channels[LORA_CHANNEL+Channel].ImagePeriod = ReadInteger(fp, "LORA_image_period", Channel, 0, 60);
-			printf ("LORA%d: %d seconds between photographs\n", Channel, Config->Channels[LORA_CHANNEL+Channel].ImagePeriod);
-			
-
-			Config->LoRaDevices[Channel].CycleTime = ReadInteger(fp, "LORA_Cycle", Channel, 0, 0);			
-			if (Config->LoRaDevices[Channel].CycleTime > 0)
-			{
-				printf("LORA%d cycle time %d\n", Channel, Config->LoRaDevices[Channel].CycleTime);
-
-				Config->LoRaDevices[Channel].Slot = ReadInteger(fp, "LORA_Slot", Channel, 0, 0);
-				printf("LORA%d Slot %d\n", Channel, Config->LoRaDevices[Channel].Slot);
-
-				Config->LoRaDevices[Channel].RepeatSlot = ReadInteger(fp, "LORA_Repeat", Channel, 0, 0);			
-				printf("LORA%d Repeat Slot %d\n", Channel, Config->LoRaDevices[Channel].RepeatSlot);
-
-				Config->LoRaDevices[Channel].UplinkSlot = ReadInteger(fp, "LORA_Uplink", Channel, 0, 0);			
-				printf("LORA%d Uplink Slot %d\n", Channel, Config->LoRaDevices[Channel].UplinkSlot);
-
-				ReadBoolean(fp, "LORA_Binary", Channel, 0, &(Config->LoRaDevices[Channel].Binary));			
-				printf("LORA%d Set To %s\n", Channel, Config->LoRaDevices[Channel].Binary ? "Binary" : "ASCII");
-			}
-
-			if (Config->LoRaDevices[Channel].SpeedMode == 4)
-			{
-				// Testing
-				Config->LoRaDevices[Channel].ImplicitOrExplicit = IMPLICIT_MODE;
-				Config->LoRaDevices[Channel].ErrorCoding = ERROR_CODING_4_5;
-				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_250K;
-				Config->LoRaDevices[Channel].SpreadingFactor = SPREADING_6;
-				Config->LoRaDevices[Channel].LowDataRateOptimize = 0;		
-				Config->Channels[LORA_CHANNEL+Channel].BaudRate = 16828;
-			}
-			else if (Config->LoRaDevices[Channel].SpeedMode == 3)
-			{
-				// Normal mode for high speed images in 868MHz band
-				Config->LoRaDevices[Channel].ImplicitOrExplicit = EXPLICIT_MODE;
-				Config->LoRaDevices[Channel].ErrorCoding = ERROR_CODING_4_6;
-				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_250K;
-				Config->LoRaDevices[Channel].SpreadingFactor = SPREADING_7;
-				Config->LoRaDevices[Channel].LowDataRateOptimize = 0;		
-				Config->Channels[LORA_CHANNEL+Channel].BaudRate = 8000;		// check!!
-			}
-			else if (Config->LoRaDevices[Channel].SpeedMode == 2)
-			{
-				// Normal mode for repeater network
-				// 72 byte packet is approx 1.5 seconds so needs at least 30 seconds cycle time if repeating one balloon
-				Config->LoRaDevices[Channel].ImplicitOrExplicit = EXPLICIT_MODE;
-				Config->LoRaDevices[Channel].ErrorCoding = ERROR_CODING_4_8;
-				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_62K5;
-				Config->LoRaDevices[Channel].SpreadingFactor = SPREADING_8;
-				Config->LoRaDevices[Channel].LowDataRateOptimize = 0;		
-				Config->Channels[LORA_CHANNEL+Channel].BaudRate = 2000;		// Not used (only for SSDV modes)
-			}
-			else if (Config->LoRaDevices[Channel].SpeedMode == 1)
-			{
-				// Normal mode for SSDV
-				Config->LoRaDevices[Channel].ImplicitOrExplicit = IMPLICIT_MODE;
-				Config->LoRaDevices[Channel].ErrorCoding = ERROR_CODING_4_5;
-				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_20K8;
-				Config->LoRaDevices[Channel].SpreadingFactor = SPREADING_6;
-				Config->LoRaDevices[Channel].LowDataRateOptimize = 0;
-				Config->Channels[LORA_CHANNEL+Channel].BaudRate = 1400;		// Used to calculate time till end of image
-			}
-			else
-			{
-				// Normal mode for telemetry
-				Config->LoRaDevices[Channel].ImplicitOrExplicit = EXPLICIT_MODE;
-				Config->LoRaDevices[Channel].ErrorCoding = ERROR_CODING_4_8;
-				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_20K8;
-				Config->LoRaDevices[Channel].SpreadingFactor = SPREADING_11;
-				Config->LoRaDevices[Channel].LowDataRateOptimize = 0x08;		
-				Config->Channels[LORA_CHANNEL+Channel].BaudRate = 60;		// Not used (only for SSDV modes)
-			}
-			
-			Temp = ReadInteger(fp, "LORA_SF", Channel, 0, 0);
-			if ((Temp >= 6) && (Temp <= 12))
-			{
-				Config->LoRaDevices[Channel].SpreadingFactor = Temp << 4;
-				printf("LoRa Setting SF=%d\n", Temp);
-			}
-
-			ReadString(fp, "LORA_Bandwidth", Channel, TempString, sizeof(TempString), 0);
-			if (*TempString)
-			{
-				printf("LoRa Setting BW=%s\n", TempString);
-			}
-			if (strcmp(TempString, "7K8") == 0)
-			{
-				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_7K8;
-			}
-			if (strcmp(TempString, "10K4") == 0)
-			{
-				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_10K4;
-			}
-			if (strcmp(TempString, "15K6") == 0)
-			{
-				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_15K6;
-			}
-			if (strcmp(TempString, "20K8") == 0)
-			{
-				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_20K8;
-			}
-			if (strcmp(TempString, "31K25") == 0)
-			{
-				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_31K25;
-			}
-			if (strcmp(TempString, "41K7") == 0)
-			{
-				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_41K7;
-			}
-			if (strcmp(TempString, "62K5") == 0)
-			{
-				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_62K5;
-			}
-			if (strcmp(TempString, "125K") == 0)
-			{
-				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_125K;
-			}
-			if (strcmp(TempString, "250K") == 0)
-			{
-				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_250K;
-			}
-			if (strcmp(TempString, "500K") == 0)
-			{
-				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_500K;
-			}
-			
-			if (ReadBoolean(fp, "LORA_Implicit", Channel, 0, &Temp))
-			{
-				if (Temp)
-				{
-					Config->LoRaDevices[Channel].ImplicitOrExplicit = IMPLICIT_MODE;
-				}
-			}
-			
-			Temp = ReadInteger(fp, "LORA_Coding", Channel, 0, 0);
-			if ((Temp >= 5) && (Temp <= 8))
-			{
-				Config->LoRaDevices[Channel].ErrorCoding = (Temp-4) << 1;
-				printf("LoRa Setting Error Coding=%d\n", Temp);
-			}
-
-			if (ReadBoolean(fp, "LORA_LowOpt", Channel, 0, &Temp))
-			{
-				if (Temp)
-				{
-					Config->LoRaDevices[Channel].LowDataRateOptimize = 0x08;
-				}
-			}
-
-			Config->LoRaDevices[Channel].Power = ReadInteger(fp, "LORA_Power", Channel, 0, PA_MAX_UK);
-			printf("LORA%d power set to %02Xh\n", Channel, Config->LoRaDevices[Channel].Power);
-
-			Config->LoRaDevices[Channel].PayloadLength = Config->LoRaDevices[Channel].ImplicitOrExplicit == IMPLICIT_MODE ? 255 : 0;
-		}
-		else
-		{
-			Config->LoRaDevices[Channel].InUse = 0;
-		}
-	}
-	
+	LoadLoRaConfig(fp, Config);
 	
 	fclose(fp);
 }
@@ -568,12 +250,15 @@ void SetMTX2Frequency(char *FrequencyString)
 	char _mtx2command[17];
 	int fd;
 	double Frequency;
+	struct termios options;
+	uint8_t setNMEAoff[] = {0xB5, 0x62, 0x06, 0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 0x00, 0xD0, 0x08, 0x00, 0x00, 0x80, 0x25, 0x00, 0x00, 0x07, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xA0, 0xA9           };
 
-	pinMode (NTX2B_ENABLE, OUTPUT);
+	// First disable transmitter
 	digitalWrite (NTX2B_ENABLE, 0);
-	delayMilliseconds (100);
+	pinMode (NTX2B_ENABLE, OUTPUT);
+	delayMilliseconds (200);
 	
-	fd = open("/dev/ttyAMA0", O_RDWR | O_NOCTTY | O_NDELAY);
+	fd = open("/dev/ttyAMA0", O_WRONLY | O_NOCTTY);
 	if (fd >= 0)
 	{
 		tcgetattr(fd, &options);
@@ -584,13 +269,21 @@ void SetMTX2Frequency(char *FrequencyString)
 		options.c_cflag |= CS8;
 		options.c_oflag &= ~ONLCR;
 		options.c_oflag &= ~OPOST;
-
+		options.c_iflag &= ~IXON;
+		options.c_iflag &= ~IXOFF;
+		options.c_lflag &= ~ECHO;
+		options.c_cc[VMIN]  = 0;
+		options.c_cc[VTIME] = 10;
+		
 		tcsetattr(fd, TCSANOW, &options);
 
-		delayMilliseconds (100);
-		pinMode (NTX2B_ENABLE, INPUT);
-		pullUpDnControl(NTX2B_ENABLE, PUD_OFF);
-		delayMilliseconds (100);
+		// Tel UBlox to shut up
+		write(fd, setNMEAoff, sizeof(setNMEAoff));
+		tcsetattr(fd, TCSAFLUSH, &options);
+		close(fd);
+		delayMilliseconds (1000);
+		
+		fd = open("/dev/ttyAMA0", O_WRONLY | O_NOCTTY);
 		
 		if (strlen(FrequencyString) < 3)
 		{
@@ -602,28 +295,52 @@ void SetMTX2Frequency(char *FrequencyString)
 			Frequency = atof(FrequencyString);
 		}
 		
-		printf("RTTY Frequency set to %8.4fMHz\n", Frequency);
+		printf("Frequency set to %8.4fMHz\n", Frequency);
 		
 		_mtx2comp=(Frequency+0.0015)/6.5;
 		_mtx2int=_mtx2comp;
 		_mtx2fractional = ((_mtx2comp-_mtx2int)+1) * 524288;
 		snprintf(_mtx2command,17,"@PRG_%02X%06lX\r",_mtx2int-1, _mtx2fractional);
+		printf("MTX2 command  is %s\n", _mtx2command);
+
+		// Let enable line float (but Tx will pull it up anyway)
+		delayMilliseconds (200);
+		pinMode (NTX2B_ENABLE, INPUT);
+		pullUpDnControl(NTX2B_ENABLE, PUD_OFF);
+		delayMilliseconds (20);
+
+		printf("Write ...\n");
 		write(fd, _mtx2command, strlen(_mtx2command)); 
+		printf("Flush ...\n");
+		tcsetattr(fd, TCSAFLUSH, &options);
+		printf("Delay ...\n");
+		delayMilliseconds (50);
+		printf("Done\n");
 
-		delayMilliseconds (100);
-		printf("MTX2 command is %s\n", _mtx2command);
-
+		printf("Closing ...\n");
 		close(fd);
+		printf("Closed\n");
+
+		// Switch on the radio
+		delayMilliseconds (100);
+		digitalWrite (NTX2B_ENABLE, 1);
+		pinMode (NTX2B_ENABLE, OUTPUT);
 	}
 }
-
 
 void SetNTX2BFrequency(char *FrequencyString)
 {
 	int fd, Frequency;
 	char Command[16];
+	struct termios options;
+	uint8_t setNMEAoff[] = {0xB5, 0x62, 0x06, 0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 0x00, 0xD0, 0x08, 0x00, 0x00, 0x80, 0x25, 0x00, 0x00, 0x07, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xA0, 0xA9           };
 
-	fd = open("/dev/ttyAMA0", O_RDWR | O_NOCTTY | O_NDELAY);
+	// First disable transmitter
+	digitalWrite (NTX2B_ENABLE, 0);
+	pinMode (NTX2B_ENABLE, OUTPUT);
+	delayMilliseconds (200);
+	
+	fd = open("/dev/ttyAMA0", O_WRONLY | O_NOCTTY);
 	if (fd >= 0)
 	{
 		tcgetattr(fd, &options);
@@ -634,12 +351,22 @@ void SetNTX2BFrequency(char *FrequencyString)
 		options.c_cflag |= CS8;
 		options.c_oflag &= ~ONLCR;
 		options.c_oflag &= ~OPOST;
-
+		options.c_iflag &= ~IXON;
+		options.c_iflag &= ~IXOFF;
+		options.c_lflag &= ~ECHO;
+		options.c_cc[VMIN]  = 0;
+		options.c_cc[VTIME] = 10;
+		
 		tcsetattr(fd, TCSANOW, &options);
 
-		pinMode (NTX2B_ENABLE, INPUT);
-		pullUpDnControl(NTX2B_ENABLE, PUD_OFF);
-
+		// Tel UBlox to shut up
+		write(fd, setNMEAoff, sizeof(setNMEAoff));
+		tcsetattr(fd, TCSAFLUSH, &options);
+		close(fd);
+		delayMilliseconds (1000);
+		
+		fd = open("/dev/ttyAMA0", O_WRONLY | O_NOCTTY);
+		
 		if (strlen(FrequencyString) < 3)
 		{
 			// Already a channel number
@@ -652,11 +379,25 @@ void SetNTX2BFrequency(char *FrequencyString)
 		}
 		
 		sprintf(Command, "%cch%02X\r", 0x80, Frequency);
-		write(fd, Command, strlen(Command)); 
 
 		printf("NTX2B-FA transmitter now set to channel %02Xh which is %8.4lfMHz\n", Frequency, (double)(Frequency) * 0.003125 + 434.05);
 
+		// Let enable line float (but Tx will pull it up anyway)
+		delayMilliseconds (200);
+		pinMode (NTX2B_ENABLE, INPUT);
+		pullUpDnControl(NTX2B_ENABLE, PUD_OFF);
+		delayMilliseconds (20);
+
+		write(fd, Command, strlen(Command)); 
+		tcsetattr(fd, TCSAFLUSH, &options);
+		delayMilliseconds (50);
+
 		close(fd);
+
+		// Switch on the radio
+		delayMilliseconds (100);
+		digitalWrite (NTX2B_ENABLE, 1);
+		pinMode (NTX2B_ENABLE, OUTPUT);
 	}
 }
 
@@ -664,6 +405,7 @@ void SetFrequency(char *Frequency)
 {
 	if (NewBoard())
 	{
+		SetMTX2Frequency(Frequency);
 		SetMTX2Frequency(Frequency);
 	}
 	else
@@ -676,7 +418,7 @@ int OpenSerialPort(void)
 {
 	int fd;
 
-	fd = open("/dev/ttyAMA0", O_RDWR | O_NOCTTY | O_NDELAY);
+	fd = open("/dev/ttyAMA0", O_WRONLY | O_NOCTTY | O_NDELAY);
 	if (fd >= 0)
 	{
 		/* get the current options */
@@ -693,6 +435,8 @@ int OpenSerialPort(void)
 		options.c_cflag |= CS8;
 		options.c_oflag &= ~ONLCR;
 		options.c_oflag &= ~OPOST;
+		options.c_iflag &= ~IXON;
+		options.c_iflag &= ~IXOFF;
 	
 		tcsetattr(fd, TCSANOW, &options);
 	}
@@ -770,14 +514,23 @@ int main(void)
 	char Sentence[100], Command[100];
 	struct stat st = {0};
 	struct TGPS GPS;
-	pthread_t LoRaThread, APRSThread, GPSThread, DS18B20Thread, ADCThread, CameraThread, BMP085Thread, LEDThread;
-
+	pthread_t PredictionThread, LoRaThread, APRSThread, GPSThread, DS18B20Thread, ADCThread, CameraThread, BMP085Thread, LEDThread;
+	
 	printf("\n\nRASPBERRY PI-IN-THE-SKY FLIGHT COMPUTER\n");
 	printf(    "=======================================\n\n");
 
 	if (NewBoard())
 	{
-		printf("RPi Model A+ or B+\n\n");
+		if (NewBoard() == 2)
+		{
+			printf("RPi 2 B\n");
+		}
+		else
+		{
+			printf("RPi Model A+ or B+\n");
+		}
+		
+		printf("PITS+ Board\n\n");
 		
 		Config.LED_OK = 25;
 		Config.LED_Warn = 24;
@@ -787,7 +540,8 @@ int main(void)
 	}
 	else
 	{
-		printf("RPi Model A or B\n\n");
+		printf("RPi Model A or B\n");
+		printf("PITS Board\n\n");
 
 		Config.LED_OK = 4;
 		Config.LED_Warn = 11;
@@ -795,7 +549,7 @@ int main(void)
 		Config.SDA = 5;
 		Config.SCL = 6;
 	}
-
+	
 	LoadConfigFile(&Config);
 
 	if (Config.DisableMonitor)
@@ -810,11 +564,12 @@ int main(void)
 	GPS.Satellites = 0;
 	GPS.Speed = 0.0;
 	GPS.Direction = 0.0;
-	GPS.InternalTemperature = 0.0;
+	GPS.DS18B20Temperature[0] = 0.0;
+	GPS.DS18B20Temperature[1] = 0.0;
 	GPS.BatteryVoltage = 0.0;
-	GPS.ExternalTemperature = 0.0;
+	GPS.BMP180Temperature = 0.0;
 	GPS.Pressure = 0.0;
-	GPS.BoardCurrent = 0.0;
+	GPS.MaximumAltitude = 0.0;
 	
 	// Set up I/O
 	if (wiringPiSetup() == -1)
@@ -822,39 +577,42 @@ int main(void)
 		exit (1);
 	}
 
+	// Switch off the radio till it's configured
+	pinMode (NTX2B_ENABLE, OUTPUT);
+	digitalWrite (NTX2B_ENABLE, 0);
+		
 	// Switch on the GPS
 	if (!NewBoard())
 	{
 		pinMode (UBLOX_ENABLE, OUTPUT);
 		digitalWrite (UBLOX_ENABLE, 0);
 	}
-	
+
+
 	if (!Config.DisableRTTY)
 	{
 		if (*Config.Frequency)
 		{
 			SetFrequency(Config.Frequency);
 		}
-	
+
 		if ((fd = OpenSerialPort()) < 0)
 		{
 			printf("Cannot open serial port - check documentation!\n");
 			exit(1);
 		}
 		close(fd);
+		
+		digitalWrite (NTX2B_ENABLE, 1);
 	}
-
-	// Switch on the radio
-	pinMode (NTX2B_ENABLE, OUTPUT);
-	digitalWrite (NTX2B_ENABLE, !Config.DisableRTTY);
 	
 	// Set up DS18B20
 	system("sudo modprobe w1-gpio");
 	system("sudo modprobe w1-therm");
 	
-	// SPI for ADC, LoRa
+	// SPI for ADC (older boards), LoRa add-on board
 	system("gpio load spi");
-
+	
 	// SSDV Folders
 	sprintf(Config.Channels[0].SSDVFolder, "%s/RTTY", SSDVFolder);
 	*Config.Channels[1].SSDVFolder = '\0';										// No folder for APRS images
@@ -889,7 +647,6 @@ int main(void)
 	if (pthread_create(&GPSThread, NULL, GPSLoop, &GPS))
 	{
 		fprintf(stderr, "Error creating GPS thread\n");
-		return 1;
 	}
 
 	if (*(Config.APRS_Callsign) && Config.APRS_ID && Config.APRS_Period)
@@ -897,7 +654,6 @@ int main(void)
 		if (pthread_create(&APRSThread, NULL, APRSLoop, &GPS))
 		{
 			fprintf(stderr, "Error creating APRS thread\n");
-			return 1;
 		}
 	}
 
@@ -906,23 +662,30 @@ int main(void)
 		if (pthread_create(&LoRaThread, NULL, LoRaLoop, &GPS))
 		{
 			fprintf(stderr, "Error creating LoRa thread\n");
-			return 1;
 		}
 	}
 	
 	if (pthread_create(&DS18B20Thread, NULL, DS18B20Loop, &GPS))
 	{
 		fprintf(stderr, "Error creating DS18B20s thread\n");
-		return 1;
 	}
 
-	if (!Config.LoRaDevices[0].InUse)
+	if (I2CADCExists())
 	{
-		// DO NOT TRY to use SPI ADC (on channel 0) if we are using LoRa channel 0
+		printf ("V2.4 or later board with I2C ADC\n");
+		
+		if (pthread_create(&ADCThread, NULL, I2CADCLoop, &GPS))
+		{
+			fprintf(stderr, "Error creating ADC thread\n");
+		}
+	}
+	else
+	{
+		printf ("Older board with SPI ADC\n");
+		
 		if (pthread_create(&ADCThread, NULL, ADCLoop, &GPS))
 		{
 			fprintf(stderr, "Error creating ADC thread\n");
-			return 1;
 		}
 	}
 
@@ -931,14 +694,12 @@ int main(void)
 		if (pthread_create(&CameraThread, NULL, CameraLoop, &GPS))
 		{
 			fprintf(stderr, "Error creating camera thread\n");
-			return 1;
 		}
 	}
 
 	if (pthread_create(&LEDThread, NULL, LEDLoop, &GPS))
 	{
 		fprintf(stderr, "Error creating LED thread\n");
-		return 1;
 	}
 	
 	if (Config.EnableBMP085)
@@ -946,9 +707,16 @@ int main(void)
 		if (pthread_create(&BMP085Thread, NULL, BMP085Loop, &GPS))
 		{
 			fprintf(stderr, "Error creating BMP085 thread\n");
-			return 1;
 		}
 	}
+	
+	if (Config.EnableLandingPrediction)
+	{
+		if (pthread_create(&PredictionThread, NULL, PredictionLoop, &GPS))
+		{
+			fprintf(stderr, "Error creating prediction thread\n");
+		}
+	}	
 		
 	while (1)
 	{	

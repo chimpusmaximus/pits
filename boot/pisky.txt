@@ -1,7 +1,7 @@
 payload=PI_SKY_PLUS
 disable_monitor=N
-# frequency=80
-frequency=434.600
+#frequency=80
+frequency=434.300
 baud=300
 camera=1
 low_width=320
@@ -11,18 +11,27 @@ high_width=640
 high_height=480
 image_packets=4
 enable_bmp085=N
+external_temperature=0
 # logging=GPS,Telemetry
+Disable_RTTY=Y
+# gps_source=/home/pi/pits/tracker/flight.txt
 
-# APRS_Callsign=M0RPI
+landing_prediction=N
+cd_area=0.66
+payload_weight=1.0
+prediction_id=XX
+
+#APRS_Callsign=M0RPI
 APRS_ID=11
 APRS_Period=1
 
-LORA_Frequency_1=434.450
-LORA_Payload_1=PI_SKY_LORA
-LORA_Mode_1=2
-LORA_Cycle_1=15
-LORA_Slot_1=2
-LORA_Repeat_1=6
-LORA_Uplink_1=10
-LORA_Binary_1=Y
-
+LORA_Frequency_0=434.400
+LORA_Payload_0=PI_SKY_TEST
+LORA_Mode_0=1
+#LORA_Cycle_0=15
+#LORA_Slot_0=2
+#LORA_Repeat_0=6
+#LORA_Uplink_0=10
+LORA_Binary_0=N
+#LORA_Calling_Frequency_0=434.475
+#LORA_Calling_Count_0=20

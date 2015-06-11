@@ -14,6 +14,8 @@
 #include <math.h>
 #include <pthread.h>
 #include <wiringPi.h>
+#include <wiringPiSPI.h>
+
 #include "gps.h"
 #include "DS18B20.h"
 #include "adc.h"
@@ -22,9 +24,6 @@
 #include "led.h"
 #include "bmp085.h"
 #include "lora.h"
-
-#include <wiringPi.h>
-#include <wiringPiSPI.h>
 
 // RFM98
 uint8_t currentMode = 0x81;
@@ -109,27 +108,62 @@ void setMode(int Channel, uint8_t newMode)
 	return;
 }
  
+void setFrequency(int Channel, double Frequency)
+{
+	unsigned long FrequencyValue;
+
+	printf("Setting LoRa Mode\n");
+	setMode(Channel, RF98_MODE_STANDBY);
+	setMode(Channel, RF98_MODE_SLEEP);
+	writeRegister(Channel, REG_OPMODE, 0x80);
+
+	setMode(Channel, RF98_MODE_SLEEP);
+
+	FrequencyValue = (unsigned long)(Frequency * 7110656 / 434);
+	
+	printf("Channel %d frequency %lf FrequencyValue = %06Xh\n", Channel, Frequency, FrequencyValue);
+	
+	writeRegister(Channel, 0x06, (FrequencyValue >> 16) & 0xFF);		// Set frequency
+	writeRegister(Channel, 0x07, (FrequencyValue >> 8) & 0xFF);
+	writeRegister(Channel, 0x08, FrequencyValue & 0xFF);
+}
+
 void setLoRaMode(int Channel)
 {
 	double Frequency;
 	unsigned long FrequencyValue;
 
-	printf("Setting LoRa Mode\n");
-	setMode(Channel, RF98_MODE_SLEEP);
-	writeRegister(Channel, REG_OPMODE, 0x80);
+	// printf("Setting LoRa Mode\n");
+	// setMode(Channel, RF98_MODE_SLEEP);
+	// writeRegister(Channel, REG_OPMODE, 0x80);
 
-	setMode(Channel, RF98_MODE_SLEEP);
+	// setMode(Channel, RF98_MODE_SLEEP);
   
 	if (sscanf(Config.LoRaDevices[Channel].Frequency, "%lf", &Frequency))
 	{
-		FrequencyValue = (unsigned long)(Frequency * 7110656 / 434);
-		printf("FrequencyValue = %06Xh\n", FrequencyValue);
-		writeRegister(Channel, 0x06, (FrequencyValue >> 16) & 0xFF);		// Set frequency
-		writeRegister(Channel, 0x07, (FrequencyValue >> 8) & 0xFF);
-		writeRegister(Channel, 0x08, FrequencyValue & 0xFF);
+		setFrequency(Channel, Frequency);
+		// FrequencyValue = (unsigned long)(Frequency * 7110656 / 434);
+		// printf("FrequencyValue = %06Xh\n", FrequencyValue);
+		// writeRegister(Channel, 0x06, (FrequencyValue >> 16) & 0xFF);		// Set frequency
+		// writeRegister(Channel, 0x07, (FrequencyValue >> 8) & 0xFF);
+		// writeRegister(Channel, 0x08, FrequencyValue & 0xFF);
 	}
 
 	printf("Mode = %d\n", readRegister(Channel, REG_OPMODE));
+}
+
+void SetLoRaParameters(int Channel, int ImplicitOrExplicit, int ErrorCoding, int Bandwidth, int SpreadingFactor, int LowDataRateOptimize)
+{
+	writeRegister(Channel, REG_MODEM_CONFIG, ImplicitOrExplicit | ErrorCoding | Bandwidth);
+	writeRegister(Channel, REG_MODEM_CONFIG2, SpreadingFactor | CRC_ON);
+	writeRegister(Channel, REG_MODEM_CONFIG3, 0x04 | LowDataRateOptimize);									// 0x04: AGC sets LNA gain
+	writeRegister(Channel, REG_DETECT_OPT, (readRegister(Channel, REG_DETECT_OPT) & 0xF8) | ((SpreadingFactor == SPREADING_6) ? 0x05 : 0x03));	// 0x05 For SF6; 0x03 otherwise
+	writeRegister(Channel, REG_DETECTION_THRESHOLD, (SpreadingFactor == SPREADING_6) ? 0x0C : 0x0A);		// 0x0C for SF6, 0x0A otherwise
+	
+	Config.LoRaDevices[Channel].PayloadLength = ImplicitOrExplicit == IMPLICIT_MODE ? 255 : 0;
+	
+	writeRegister(Channel, REG_PAYLOAD_LENGTH, Config.LoRaDevices[Channel].PayloadLength);
+	writeRegister(Channel, REG_RX_NB_BYTES, Config.LoRaDevices[Channel].PayloadLength);
 }
 
 void setupRFM98(int Channel)
@@ -146,32 +180,34 @@ void setupRFM98(int Channel)
 			fprintf(stderr, "Failed to open SPI port.  Try loading spi library with 'gpio load spi'");
 			exit(1);
 		}
-
-		// LoRa mode 
+		
 		setLoRaMode(Channel);
 
-		writeRegister(Channel, REG_MODEM_CONFIG, Config.LoRaDevices[Channel].ImplicitOrExplicit | Config.LoRaDevices[Channel].ErrorCoding | Config.LoRaDevices[Channel].Bandwidth);
-		writeRegister(Channel, REG_MODEM_CONFIG2, Config.LoRaDevices[Channel].SpreadingFactor | CRC_ON);
-		writeRegister(Channel, REG_MODEM_CONFIG3, 0x04 | Config.LoRaDevices[Channel].LowDataRateOptimize);									// 0x04: AGC sets LNA gain
-		writeRegister(Channel, REG_DETECT_OPT, (readRegister(Channel, REG_DETECT_OPT) & 0xF8) | ((Config.LoRaDevices[Channel].SpreadingFactor == SPREADING_6) ? 0x05 : 0x03));	// 0x05 For SF6; 0x03 otherwise
-		writeRegister(Channel, REG_DETECTION_THRESHOLD, (Config.LoRaDevices[Channel].SpreadingFactor == SPREADING_6) ? 0x0C : 0x0A);		// 0x0C for SF6, 0x0A otherwise
+		SetLoRaParameters(Channel,
+						  Config.LoRaDevices[Channel].ImplicitOrExplicit,
+						  Config.LoRaDevices[Channel].ErrorCoding,
+						  Config.LoRaDevices[Channel].Bandwidth,
+						  Config.LoRaDevices[Channel]. SpreadingFactor,
+						  Config.LoRaDevices[Channel].LowDataRateOptimize);
 		
-		writeRegister(Channel, REG_PAYLOAD_LENGTH, Config.LoRaDevices[Channel].PayloadLength);
-		writeRegister(Channel, REG_RX_NB_BYTES, Config.LoRaDevices[Channel].PayloadLength);
+		// writeRegister(Channel, REG_PAYLOAD_LENGTH, Config.LoRaDevices[Channel].PayloadLength);
+		// writeRegister(Channel, REG_RX_NB_BYTES, Config.LoRaDevices[Channel].PayloadLength);
 
 		writeRegister(Channel, REG_FIFO_ADDR_PTR, 0);		// woz readRegister(Channel, REG_FIFO_RX_BASE_AD));   
 
 		// writeRegister(Channel, REG_DIO_MAPPING_1,0x40);
 		writeRegister(Channel, REG_DIO_MAPPING_2,0x00);
+		
 	}
 }
+
 
 void SendLoRaData(int Channel, unsigned char *buffer, int Length)
 {
 	unsigned char data[257];
 	int i;
 	
-	printf("LoRa Channel %d Sending %d bytes\n", Channel, Length);
+	// printf("LoRa Channel %d Sending %d bytes\n", Channel, Length);
   
 	setMode(Channel, RF98_MODE_STANDBY);
 	
@@ -198,13 +234,33 @@ void SendLoRaData(int Channel, unsigned char *buffer, int Length)
 	Config.LoRaDevices[Channel].LoRaMode = lmSending;
 }
 
+int BuildLoRaCall(char *TxLine, int Channel)
+{
+    int Count, i, j;
+    unsigned char c;
+    unsigned int CRC, xPolynomial;
+		
+    sprintf(TxLine, "^^%s,%s,%d,%d,%d,%d,%d",
+            Config.Channels[LORA_CHANNEL+Channel].PayloadID,
+			Config.LoRaDevices[Channel].Frequency,
+			Config.LoRaDevices[Channel].ImplicitOrExplicit,
+			Config.LoRaDevices[Channel].ErrorCoding,
+			Config.LoRaDevices[Channel].Bandwidth,
+			Config.LoRaDevices[Channel].SpreadingFactor,
+			Config.LoRaDevices[Channel].LowDataRateOptimize);
+			
+	AppendCRC(TxLine);
+		
+	return strlen(TxLine) + 1;
+}
+
 
 int BuildLoRaSentence(char *TxLine, int Channel, struct TGPS *GPS)
 {
     int Count, i, j;
     unsigned char c;
     unsigned int CRC, xPolynomial;
-	char TimeBuffer1[12], TimeBuffer2[10], ExtraFields[80];
+	char TimeBuffer1[12], TimeBuffer2[10], ExtraFields1[20], ExtraFields2[20], ExtraFields3[20], ExtraFields4[32];
 	
 	Config.Channels[LORA_CHANNEL+Channel].SentenceCounter++;
 	
@@ -219,14 +275,32 @@ int BuildLoRaSentence(char *TxLine, int Channel, struct TGPS *GPS)
 	TimeBuffer2[7] = TimeBuffer1[5];
 	TimeBuffer2[8] = '\0';
 	
-	ExtraFields[0] = '\0';
+	ExtraFields1[0] = '\0';
+	ExtraFields2[0] = '\0';
+	ExtraFields3[0] = '\0';
+	ExtraFields4[0] = '\0';
+	
+	if (NewBoard())
+	{
+		sprintf(ExtraFields1, ",%.0f", GPS->BoardCurrent * 1000);
+	}
 	
 	if (Config.EnableBMP085)
 	{
-		sprintf(ExtraFields, ",%.1f,%.0f", GPS->ExternalTemperature, GPS->Pressure);
+		sprintf(ExtraFields2, ",%.1f,%.0f", GPS->BMP180Temperature, GPS->Pressure);
 	}
 	
-    sprintf(TxLine, "$$%s,%d,%s,%7.5lf,%7.5lf,%05.5u,%d,%d,%d,%d,%d,%s",
+	if (GPS->DS18B20Count > 1)
+	{
+		sprintf(ExtraFields3, ",%3.1f", GPS->DS18B20Temperature[Config.ExternalDS18B20]);
+	}
+	
+	if (Config.EnableLandingPrediction && (Config.PredictionID[0] == '\0'))
+	{	
+		sprintf(ExtraFields4, ",%7.5lf,%7.5lf", GPS->PredictedLatitude, GPS->PredictedLongitude);
+	}
+		
+    sprintf(TxLine, "$$%s,%d,%s,%7.5lf,%7.5lf,%05.5u,%d,%d,%d,%3.1f,%3.1f,%d,%d,%s%s%s%s%s",
             Config.Channels[LORA_CHANNEL+Channel].PayloadID,
             Config.Channels[LORA_CHANNEL+Channel].SentenceCounter,
 			TimeBuffer2,
@@ -236,34 +310,32 @@ int BuildLoRaSentence(char *TxLine, int Channel, struct TGPS *GPS)
 			(GPS->Speed * 13) / 7,
 			GPS->Direction,
 			GPS->Satellites,
+            GPS->DS18B20Temperature[1-Config.ExternalDS18B20],
+            GPS->BatteryVoltage,
 			Config.LoRaDevices[Channel].GroundCount,
 			Config.LoRaDevices[Channel].AirCount,
-			Config.LoRaDevices[Channel].LastCommand);
-
-    Count = strlen(TxLine);
-
-    CRC = 0xffff;           // Seed
-    xPolynomial = 0x1021;
-   
-     for (i = 2; i < Count; i++)
-     {   // For speed, repeat calculation instead of looping for each bit
-        CRC ^= (((unsigned int)TxLine[i]) << 8);
-        for (j=0; j<8; j++)
-        {
-            if (CRC & 0x8000)
-                CRC = (CRC << 1) ^ 0x1021;
-            else
-                CRC <<= 1;
-        }
-     }
-
-    TxLine[Count++] = '*';
-    TxLine[Count++] = Hex((CRC >> 12) & 15);
-    TxLine[Count++] = Hex((CRC >> 8) & 15);
-    TxLine[Count++] = Hex((CRC >> 4) & 15);
-    TxLine[Count++] = Hex(CRC & 15);
-	TxLine[Count++] = '\n';  
-	TxLine[Count++] = '\0';
+			Config.LoRaDevices[Channel].LastCommand,
+			ExtraFields1,
+			ExtraFields2,
+			ExtraFields3,
+			ExtraFields4);			
+	AppendCRC(TxLine);
+	
+	if (Config.PredictionID[0])
+	{
+		char PredictionPayload[64];
+		
+		sprintf(PredictionPayload,
+				"$$%s,%d,%s,%7.5lf,%7.5lf,%u",
+				Config.PredictionID,
+				Config.Channels[LORA_CHANNEL+Channel].SentenceCounter,
+				TimeBuffer2,
+				GPS->PredictedLatitude,
+				GPS->PredictedLongitude,
+				0);
+		AppendCRC(PredictionPayload);
+		strcat(TxLine, PredictionPayload);
+	}
 	
 	return strlen(TxLine) + 1;
 }
@@ -541,7 +613,7 @@ int CheckForFreeChannel(struct TGPS *GPS)
 		{
 			if ((Config.LoRaDevices[Channel].LoRaMode != lmSending) || digitalRead(Config.LoRaDevices[Channel].DIO0))
 			{
-				printf ("LoRa Channel %d is free\n", Channel);
+				// printf ("LoRa Channel %d is free\n", Channel);
 				// Either not sending, or was but now it's sent.  Clear the flag if we need to
 				if (Config.LoRaDevices[Channel].LoRaMode == lmSending)
 				{
@@ -581,12 +653,260 @@ int CheckForFreeChannel(struct TGPS *GPS)
 	
 	return -1;
 }
+
+void LoadLoRaConfig(FILE *fp, struct TConfig *Config)
+{
+	const char *LoRaModes[5] = {"slow", "SSDV", "repeater", "turbo", "TurboX"};
+	int Channel;
+	
+	if (NewBoard())
+	{
+		// For dual card.  These are for the second prototype (earlier one will need overrides)
+
+		Config->LoRaDevices[0].DIO0 = 6;
+		Config->LoRaDevices[0].DIO5 = 5;
+		
+		Config->LoRaDevices[1].DIO0 = 31;
+		Config->LoRaDevices[1].DIO5 = 26;
+	}
+	else
+	{
+		// Only used for handmade test boards
+		Config->LoRaDevices[0].DIO0 = 6;
+		Config->LoRaDevices[0].DIO5 = 5;
+		
+		Config->LoRaDevices[1].DIO0 = 3;
+		Config->LoRaDevices[1].DIO5 = 4;
+	}
+
+	Config->LoRaDevices[0].InUse = 0;
+	Config->LoRaDevices[1].InUse = 0;
+	
+	Config->LoRaDevices[0].LoRaMode = lmIdle;
+	Config->LoRaDevices[1].LoRaMode = lmIdle;
+
+
+	for (Channel=0; Channel<=1; Channel++)
+	{
+		int Temp;
+		char TempString[64];
+		
+		strcpy(Config->LoRaDevices[Channel].LastCommand, "None");
+		
+		Config->LoRaDevices[Channel].Frequency[0] = '\0';
+		ReadString(fp, "LORA_Frequency", Channel, Config->LoRaDevices[Channel].Frequency, sizeof(Config->LoRaDevices[Channel].Frequency), 0);
+		
+		if (Config->LoRaDevices[Channel].Frequency[0])
+		{
+			printf("LORA%d frequency set to %s\n", Channel, Config->LoRaDevices[Channel].Frequency);
+			Config->LoRaDevices[Channel].InUse = 1;
+			Config->Channels[LORA_CHANNEL+Channel].Enabled = 1;
+
+			ReadString(fp, "LORA_Payload", Channel, Config->Channels[LORA_CHANNEL+Channel].PayloadID, sizeof(Config->Channels[LORA_CHANNEL+Channel].PayloadID), 1);
+			printf ("LORA%d Payload ID = '%s'\n", Channel, Config->Channels[LORA_CHANNEL+Channel].PayloadID);
+			
+			Config->LoRaDevices[Channel].SpeedMode = ReadInteger(fp, "LORA_Mode", Channel, 0, 0);
+			printf("LORA%d %s mode\n", Channel, LoRaModes[Config->LoRaDevices[Channel].SpeedMode]);
+
+			// DIO0 / DIO5 overrides
+			Config->LoRaDevices[Channel].DIO0 = ReadInteger(fp, "LORA_DIO0", Channel, 0, Config->LoRaDevices[Channel].DIO0);
+
+			Config->LoRaDevices[Channel].DIO5 = ReadInteger(fp, "LORA_DIO5", Channel, 0, Config->LoRaDevices[Channel].DIO5);
+
+			printf("LORA%d DIO0=%d DIO5=%d\n", Channel, Config->LoRaDevices[Channel].DIO0, Config->LoRaDevices[Channel].DIO5);
+			
+			Config->Channels[LORA_CHANNEL+Channel].ImageWidthWhenLow = ReadInteger(fp, "LORA_low_width", Channel, 0, 320);
+			Config->Channels[LORA_CHANNEL+Channel].ImageHeightWhenLow = ReadInteger(fp, "LORA_low_height", Channel, 0, 240);
+			printf ("LORA%d Low image size %d x %d pixels\n", Channel, Config->Channels[LORA_CHANNEL+Channel].ImageWidthWhenLow, Config->Channels[LORA_CHANNEL+Channel].ImageHeightWhenLow);
+			
+			Config->Channels[LORA_CHANNEL+Channel].ImageWidthWhenHigh = ReadInteger(fp, "LORA_high_width", Channel, 0, 640);
+			Config->Channels[LORA_CHANNEL+Channel].ImageHeightWhenHigh = ReadInteger(fp, "LORA_high_height", Channel, 0, 480);
+			printf ("LORA%d High image size %d x %d pixels\n", Channel, Config->Channels[LORA_CHANNEL+Channel].ImageWidthWhenHigh, Config->Channels[LORA_CHANNEL+Channel].ImageHeightWhenHigh);
+
+			Config->Channels[LORA_CHANNEL+Channel].ImagePackets = ReadInteger(fp, "LORA_image_packets", Channel, 0, 4);
+			printf ("LORA%d: 1 Telemetry packet every %d image packets\n", Channel, Config->Channels[LORA_CHANNEL+Channel].ImagePackets);
+			
+			Config->Channels[LORA_CHANNEL+Channel].ImagePeriod = ReadInteger(fp, "LORA_image_period", Channel, 0, 60);
+			printf ("LORA%d: %d seconds between photographs\n", Channel, Config->Channels[LORA_CHANNEL+Channel].ImagePeriod);
+			
+
+			Config->LoRaDevices[Channel].CycleTime = ReadInteger(fp, "LORA_Cycle", Channel, 0, 0);			
+			if (Config->LoRaDevices[Channel].CycleTime > 0)
+			{
+				printf("LORA%d cycle time %d\n", Channel, Config->LoRaDevices[Channel].CycleTime);
+
+				Config->LoRaDevices[Channel].Slot = ReadInteger(fp, "LORA_Slot", Channel, 0, 0);
+				printf("LORA%d Slot %d\n", Channel, Config->LoRaDevices[Channel].Slot);
+
+				Config->LoRaDevices[Channel].RepeatSlot = ReadInteger(fp, "LORA_Repeat", Channel, 0, 0);			
+				printf("LORA%d Repeat Slot %d\n", Channel, Config->LoRaDevices[Channel].RepeatSlot);
+
+				Config->LoRaDevices[Channel].UplinkSlot = ReadInteger(fp, "LORA_Uplink", Channel, 0, 0);			
+				printf("LORA%d Uplink Slot %d\n", Channel, Config->LoRaDevices[Channel].UplinkSlot);
+
+				ReadBoolean(fp, "LORA_Binary", Channel, 0, &(Config->LoRaDevices[Channel].Binary));			
+				printf("LORA%d Set To %s\n", Channel, Config->LoRaDevices[Channel].Binary ? "Binary" : "ASCII");
+			}
+
+			if (Config->LoRaDevices[Channel].SpeedMode == 4)
+			{
+				// Testing
+				Config->LoRaDevices[Channel].ImplicitOrExplicit = IMPLICIT_MODE;
+				Config->LoRaDevices[Channel].ErrorCoding = ERROR_CODING_4_5;
+				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_250K;
+				Config->LoRaDevices[Channel].SpreadingFactor = SPREADING_6;
+				Config->LoRaDevices[Channel].LowDataRateOptimize = 0;		
+				Config->Channels[LORA_CHANNEL+Channel].BaudRate = 16828;
+			}
+			else if (Config->LoRaDevices[Channel].SpeedMode == 3)
+			{
+				// Normal mode for high speed images in 868MHz band
+				Config->LoRaDevices[Channel].ImplicitOrExplicit = EXPLICIT_MODE;
+				Config->LoRaDevices[Channel].ErrorCoding = ERROR_CODING_4_6;
+				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_250K;
+				Config->LoRaDevices[Channel].SpreadingFactor = SPREADING_7;
+				Config->LoRaDevices[Channel].LowDataRateOptimize = 0;		
+				Config->Channels[LORA_CHANNEL+Channel].BaudRate = 8000;		// check!!
+			}
+			else if (Config->LoRaDevices[Channel].SpeedMode == 2)
+			{
+				// Normal mode for repeater network
+				// 72 byte packet is approx 1.5 seconds so needs at least 30 seconds cycle time if repeating one balloon
+				Config->LoRaDevices[Channel].ImplicitOrExplicit = EXPLICIT_MODE;
+				Config->LoRaDevices[Channel].ErrorCoding = ERROR_CODING_4_8;
+				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_62K5;
+				Config->LoRaDevices[Channel].SpreadingFactor = SPREADING_8;
+				Config->LoRaDevices[Channel].LowDataRateOptimize = 0;		
+				Config->Channels[LORA_CHANNEL+Channel].BaudRate = 2000;		// Not used (only for SSDV modes)
+			}
+			else if (Config->LoRaDevices[Channel].SpeedMode == 1)
+			{
+				// Normal mode for SSDV
+				Config->LoRaDevices[Channel].ImplicitOrExplicit = IMPLICIT_MODE;
+				Config->LoRaDevices[Channel].ErrorCoding = ERROR_CODING_4_5;
+				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_20K8;
+				Config->LoRaDevices[Channel].SpreadingFactor = SPREADING_6;
+				Config->LoRaDevices[Channel].LowDataRateOptimize = 0;
+				Config->Channels[LORA_CHANNEL+Channel].BaudRate = 1400;		// Used to calculate time till end of image
+			}
+			else
+			{
+				// Normal mode for telemetry
+				Config->LoRaDevices[Channel].ImplicitOrExplicit = EXPLICIT_MODE;
+				Config->LoRaDevices[Channel].ErrorCoding = ERROR_CODING_4_8;
+				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_20K8;
+				Config->LoRaDevices[Channel].SpreadingFactor = SPREADING_11;
+				Config->LoRaDevices[Channel].LowDataRateOptimize = 0x08;		
+				Config->Channels[LORA_CHANNEL+Channel].BaudRate = 60;		// Not used (only for SSDV modes)
+			}
+			
+			Temp = ReadInteger(fp, "LORA_SF", Channel, 0, 0);
+			if ((Temp >= 6) && (Temp <= 12))
+			{
+				Config->LoRaDevices[Channel].SpreadingFactor = Temp << 4;
+				printf("LoRa Setting SF=%d\n", Temp);
+			}
+
+			ReadString(fp, "LORA_Bandwidth", Channel, TempString, sizeof(TempString), 0);
+			if (*TempString)
+			{
+				printf("LoRa Setting BW=%s\n", TempString);
+			}
+			if (strcmp(TempString, "7K8") == 0)
+			{
+				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_7K8;
+			}
+			if (strcmp(TempString, "10K4") == 0)
+			{
+				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_10K4;
+			}
+			if (strcmp(TempString, "15K6") == 0)
+			{
+				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_15K6;
+			}
+			if (strcmp(TempString, "20K8") == 0)
+			{
+				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_20K8;
+			}
+			if (strcmp(TempString, "31K25") == 0)
+			{
+				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_31K25;
+			}
+			if (strcmp(TempString, "41K7") == 0)
+			{
+				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_41K7;
+			}
+			if (strcmp(TempString, "62K5") == 0)
+			{
+				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_62K5;
+			}
+			if (strcmp(TempString, "125K") == 0)
+			{
+				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_125K;
+			}
+			if (strcmp(TempString, "250K") == 0)
+			{
+				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_250K;
+			}
+			if (strcmp(TempString, "500K") == 0)
+			{
+				Config->LoRaDevices[Channel].Bandwidth = BANDWIDTH_500K;
+			}
+			
+			if (ReadBoolean(fp, "LORA_Implicit", Channel, 0, &Temp))
+			{
+				if (Temp)
+				{
+					Config->LoRaDevices[Channel].ImplicitOrExplicit = IMPLICIT_MODE;
+				}
+			}
+			
+			Temp = ReadInteger(fp, "LORA_Coding", Channel, 0, 0);
+			if ((Temp >= 5) && (Temp <= 8))
+			{
+				Config->LoRaDevices[Channel].ErrorCoding = (Temp-4) << 1;
+				printf("LoRa Setting Error Coding=%d\n", Temp);
+			}
+
+			if (ReadBoolean(fp, "LORA_LowOpt", Channel, 0, &Temp))
+			{
+				if (Temp)
+				{
+					Config->LoRaDevices[Channel].LowDataRateOptimize = 0x08;
+				}
+			}
+
+			Config->LoRaDevices[Channel].Power = ReadInteger(fp, "LORA_Power", Channel, 0, PA_MAX_UK);
+			printf("LORA%d power set to %02Xh\n", Channel, Config->LoRaDevices[Channel].Power);
+
+			// Config->LoRaDevices[Channel].PayloadLength = Config->LoRaDevices[Channel].ImplicitOrExplicit == IMPLICIT_MODE ? 255 : 0;
+			
+			Config->LoRaDevices[Channel].CallingFrequency[0] = '\0';
+			ReadString(fp, "LORA_Calling_Frequency", Channel, Config->LoRaDevices[Channel].CallingFrequency, sizeof(Config->LoRaDevices[Channel].CallingFrequency), 0);
+		
+			if (Config->LoRaDevices[Channel].CallingFrequency[0])
+			{
+				// Calling frequency enabled
+				
+				Config->LoRaDevices[Channel].CallingCount = ReadInteger(fp, "LORA_Calling_Count", Channel, 0, 0);
+				if (Config->LoRaDevices[Channel].CallingCount)
+				{
+					printf("LoRa channel %d will Tx on calling frequency %s every %d packets\n", Channel, Config->LoRaDevices[Channel].CallingFrequency, Config->LoRaDevices[Channel].CallingCount);
+				}
+			}
+		}
+		else
+		{
+			Config->LoRaDevices[Channel].InUse = 0;
+		}
+	}
+}
 	
 void *LoRaLoop(void *some_void_ptr)
 {
 	int ReturnCode, ImagePacketCount, fd, LoRaChannel;
 	unsigned long Sentence_Counter = 0;
-	char Sentence[100], Command[100];
+	char Sentence[200], Command[100];
 	struct stat st = {0};
 	struct TGPS *GPS;
 
@@ -599,6 +919,8 @@ void *LoRaLoop(void *some_void_ptr)
 		{
 			startReceiving(LoRaChannel);
 		}
+		
+		Config.LoRaDevices[LoRaChannel].PacketsSinceLastCall = Config.LoRaDevices[LoRaChannel].CallingCount;		// So we do the calling channel first
 	}
 
 	ImagePacketCount = 0;
@@ -614,6 +936,23 @@ void *LoRaLoop(void *some_void_ptr)
 		if (LoRaChannel >= 0)
 		{
 			int MaxImagePackets;
+
+			if (Config.LoRaDevices[LoRaChannel].ReturnStateAfterCall)
+			{
+				double Frequency;
+				
+				Config.LoRaDevices[LoRaChannel].ReturnStateAfterCall = 0;
+
+				sscanf(Config.LoRaDevices[LoRaChannel].Frequency, "%lf", &Frequency);
+				setFrequency(LoRaChannel, Frequency);
+
+				SetLoRaParameters(LoRaChannel,
+								  Config.LoRaDevices[LoRaChannel].ImplicitOrExplicit,
+								  Config.LoRaDevices[LoRaChannel].ErrorCoding,
+								  Config.LoRaDevices[LoRaChannel].Bandwidth,
+								  Config.LoRaDevices[LoRaChannel]. SpreadingFactor,
+								  Config.LoRaDevices[LoRaChannel].LowDataRateOptimize);
+			}
 			
 			if (Config.LoRaDevices[LoRaChannel].SendRepeatedPacket == 2)
 			{
@@ -631,6 +970,29 @@ void *LoRaLoop(void *some_void_ptr)
 				
 				Config.LoRaDevices[LoRaChannel].PacketRepeatLength = 0;
 			}
+			else if (Config.LoRaDevices[LoRaChannel].CallingFrequency[0] &&
+					 Config.LoRaDevices[LoRaChannel].CallingCount &&
+					 (Config.LoRaDevices[LoRaChannel].PacketsSinceLastCall >= Config.LoRaDevices[LoRaChannel].CallingCount))
+			{
+				int PacketLength;
+				double Frequency;
+
+				sscanf(Config.LoRaDevices[LoRaChannel].CallingFrequency, "%lf", &Frequency);
+				setFrequency(LoRaChannel, Frequency);
+				printf("Calling frequency is %lf\n", Frequency);
+				
+				SetLoRaParameters(LoRaChannel, EXPLICIT_MODE, ERROR_CODING_4_8, BANDWIDTH_41K7, SPREADING_11, 0);	// 0x08);
+
+				PacketLength = BuildLoRaCall(Sentence, LoRaChannel);
+				printf("LoRa%d: %s", LoRaChannel, Sentence);
+									
+				SendLoRaData(LoRaChannel, Sentence, PacketLength);		
+				
+				Config.LoRaDevices[LoRaChannel].ReturnStateAfterCall = 1;
+
+				Config.LoRaDevices[LoRaChannel].PacketsSinceLastCall = 0;
+			}
+
 			else
 			{
 				StartNewFileIfNeeded(LORA_CHANNEL + LoRaChannel);
@@ -657,6 +1019,7 @@ void *LoRaLoop(void *some_void_ptr)
 					SendLoRaData(LoRaChannel, Sentence, PacketLength);		
 
 					Config.Channels[LORA_CHANNEL+LoRaChannel].ImagePacketCount = 0;
+					Config.LoRaDevices[LoRaChannel].PacketsSinceLastCall++;
 				}
 				else
 				{

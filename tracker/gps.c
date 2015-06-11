@@ -1,16 +1,17 @@
 /* ========================================================================== */
 /*   gps.c                                                                    */
 /*                                                                            */
-/*   Serial and i2c bit-banging code for ublox on Pi A/A+/B/B+                */
+/*   i2c bit-banging code for ublox on Pi A/A+/B/B+                           */
 /*                                                                            */
 /*   Description                                                              */
 /*                                                                            */
 /*   12/10/14: Modified for the UBlox Max8 on the B+ board                    */
 /*   19/12/14: Rewritten to use wiringPi library                              */
-/*   10/01/15: Added support for serial GPS connection                        */
 /*                                                                            */
 /*                                                                            */
 /* ========================================================================== */
+// Version 0.1 7/9/2012
+// * removed a line of debug code
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -327,23 +328,19 @@ int GPSChecksumOK(unsigned char *Buffer, int Count)
 }
 
 
-void SendUBX(int fd, struct i2c_info *bb, unsigned char *MSG, int len)
+void SendUBX(struct i2c_info *bb, unsigned char *MSG, int len)
 {
-	if (bb == NULL)
-	{
-		write(fd, MSG, len);
-	}
-	else
+	if (bb != NULL)
 	{
 		I2Cputs(bb, MSG, len);
 	}
 }
 
-void SetFlightMode(int fd, struct i2c_info *bb)
+void SetFlightMode(struct i2c_info *bb)
 {
     // Send navigation configuration command
     unsigned char setNav[] = {0xB5, 0x62, 0x06, 0x24, 0x24, 0x00, 0xFF, 0xFF, 0x06, 0x03, 0x00, 0x00, 0x00, 0x00, 0x10, 0x27, 0x00, 0x00, 0x05, 0x00, 0xFA, 0x00, 0xFA, 0x00, 0x64, 0x00, 0x2C, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x16, 0xDC};
-    SendUBX(fd, bb, setNav, sizeof(setNav));
+    SendUBX(bb, setNav, sizeof(setNav));
 	printf ("Setting flight mode\n");
 }
 
@@ -359,11 +356,11 @@ float FixPosition(float Position)
 	return Minutes + Seconds * 5 / 3;
 }
 
-void ProcessLine(int fd, struct i2c_info *bb, struct TGPS *GPS, char *Buffer, int Count)
+void ProcessLine(struct i2c_info *bb, struct TGPS *GPS, char *Buffer, int Count, int ActionMask)
 {
     float utc_time, latitude, longitude, hdop, altitude, speed, course;
 	int lock, satellites, date;
-	char ns, ew, units;
+	char active, ns, ew, units, speedstring[16], coursestring[16];
 	long Hours, Minutes, Seconds;
 	
     if (GPSChecksumOK(Buffer, Count))
@@ -377,18 +374,32 @@ void ProcessLine(int fd, struct i2c_info *bb, struct TGPS *GPS, char *Buffer, in
 				// $GPGGA,124943.00,5157.01557,N,00232.66381,W,1,09,1.01,149.3,M,48.6,M,,*42
 				if (satellites >= 4)
 				{
-					GPS->Time = utc_time;
-					Hours = GPS->Time / 10000;
-					Minutes = (GPS->Time / 100) % 100;
-					Seconds = GPS->Time % 100;
-					GPS->Seconds = Hours * 3600 + Minutes * 60 + Seconds;
-					GPS->Latitude = FixPosition(latitude);
-					if (ns == 'S') GPS->Latitude = -GPS->Latitude;
-					GPS->Longitude = FixPosition(longitude);
-					if (ew == 'W') GPS->Longitude = -GPS->Longitude;
-					GPS->Altitude = altitude;
+					if (ActionMask & 1)
+					{
+						GPS->Time = utc_time;
+						Hours = GPS->Time / 10000;
+						Minutes = (GPS->Time / 100) % 100;
+						Seconds = GPS->Time % 100;
+						GPS->Seconds = Hours * 3600 + Minutes * 60 + Seconds;
+					}
+					
+					if (ActionMask & 2)
+					{
+						GPS->Latitude = FixPosition(latitude);
+						if (ns == 'S') GPS->Latitude = -GPS->Latitude;
+						GPS->Longitude = FixPosition(longitude);
+						if (ew == 'W') GPS->Longitude = -GPS->Longitude;
+						GPS->Altitude = altitude;
+						if (GPS->Altitude > GPS->MaximumAltitude) GPS->MaximumAltitude = GPS->Altitude;
+						GPS->Latitude = GPS->Latitude + 51.950279 - 52.251465;
+						GPS->Longitude = GPS->Longitude + 0.092384 - 2.544374;
+					}
 				}
-				GPS->Satellites = satellites;
+				
+				if (ActionMask & 2)
+				{
+					GPS->Satellites = satellites;
+				}
 			}
 			if (Config.EnableGPSLogging)
 			{
@@ -397,9 +408,15 @@ void ProcessLine(int fd, struct i2c_info *bb, struct TGPS *GPS, char *Buffer, in
 		}
 		else if (strncmp(Buffer+3, "RMC", 3) == 0)
 		{
-			if (sscanf(Buffer+7, "%f,%f,%c,%f,%c,%f,%f,%d", &utc_time, &latitude, &ns, &longitude, &ew, &speed, &course, &date) >= 1)
+			speedstring[0] = '\0';
+			coursestring[0] = '\0';
+			if (sscanf(Buffer+7, "%f,%c,%f,%c,%f,%c,%[^','],%[^','],%d", &utc_time, &active, &latitude, &ns, &longitude, &ew, speedstring, coursestring, &date) >= 7)
 			{
 				// $GPRMC,124943.00,A,5157.01557,N,00232.66381,W,0.039,,200314,,,A*6C
+
+				speed = atof(speedstring);
+				course = atof(coursestring);
+				
 				GPS->Speed = (int)speed;
 				GPS->Direction = (int)course;
 			}
@@ -414,28 +431,28 @@ void ProcessLine(int fd, struct i2c_info *bb, struct TGPS *GPS, char *Buffer, in
             // Disable GSV
             printf("Disabling GSV\r\n");
             unsigned char setGSV[] = { 0xB5, 0x62, 0x06, 0x01, 0x08, 0x00, 0xF0, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x03, 0x39 };
-            SendUBX(fd, bb, setGSV, sizeof(setGSV));
+            SendUBX(bb, setGSV, sizeof(setGSV));
         }
 		else if (strncmp(Buffer+3, "GLL", 3) == 0)
         {
             // Disable GLL
             printf("Disabling GLL\r\n");
             unsigned char setGLL[] = { 0xB5, 0x62, 0x06, 0x01, 0x08, 0x00, 0xF0, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x2B };
-            SendUBX(fd, bb, setGLL, sizeof(setGLL));
+            SendUBX(bb, setGLL, sizeof(setGLL));
         }
 		else if (strncmp(Buffer+3, "GSA", 3) == 0)
         {
             // Disable GSA
             printf("Disabling GSA\r\n");
             unsigned char setGSA[] = { 0xB5, 0x62, 0x06, 0x01, 0x08, 0x00, 0xF0, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x32 };
-            SendUBX(fd, bb, setGSA, sizeof(setGSA));
+            SendUBX(bb, setGSA, sizeof(setGSA));
         }
 		else if (strncmp(Buffer+3, "VTG", 3) == 0)
         {
             // Disable VTG
             printf("Disabling VTG\r\n");
             unsigned char setVTG[] = {0xB5, 0x62, 0x06, 0x01, 0x08, 0x00, 0xF0, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x05, 0x47};
-            SendUBX(fd, bb, setVTG, sizeof(setVTG));
+            SendUBX(bb, setVTG, sizeof(setVTG));
         }
         else
         {
@@ -449,17 +466,24 @@ void ProcessLine(int fd, struct i2c_info *bb, struct TGPS *GPS, char *Buffer, in
 }
 
 
-void *GPSLoopI2C(void *some_void_ptr)
+void *GPSLoop(void *some_void_ptr)
 {
 	unsigned char Line[100];
 	int id, Length;
 	struct i2c_info bb;
 	struct TGPS *GPS;
+	FILE *fp;
 
 	GPS = (struct TGPS *)some_void_ptr;
 	
-	Length = 0;
+	fp = NULL;
+	if (Config.GPSSource[0])
+	{
+		fp = fopen(Config.GPSSource, "rt");
+	}
 
+	Length = 0;
+	
     while (1)
     {
         int i;
@@ -473,7 +497,7 @@ void *GPSLoopI2C(void *some_void_ptr)
 			exit(1);
 		}
 	
-		SetFlightMode(0, &bb);
+		SetFlightMode(&bb);
 
         while (!bb.Failed)
         {
@@ -499,7 +523,26 @@ void *GPSLoopI2C(void *some_void_ptr)
                	{
                		Line[Length] = '\0';
 					// puts(Line);
-               		ProcessLine(0, &bb, GPS, Line, Length);
+					if ((fp != NULL) && (strstr(Line, "GGA") != NULL))
+					{
+						char Buffer[100];
+						
+						// Get time only from GPS, then get position from NMEA file
+						if (fgets(Buffer, sizeof Buffer, fp) == NULL)
+						{
+							fclose(fp);
+							fp = NULL;
+						}
+						else
+						{
+							ProcessLine(NULL, GPS, Line, Length, 1);
+							ProcessLine(NULL, GPS, Buffer, strlen(Buffer), 2);
+						}
+					}
+					else
+					{
+						ProcessLine(&bb, GPS, Line, Length, 3);
+					}
 					delayMilliseconds (100);
                		Length = 0;
                	}
@@ -510,77 +553,4 @@ void *GPSLoopI2C(void *some_void_ptr)
 	}
 }
 
-void *GPSLoopSerial(void *some_void_ptr)
-{
-	int fd;
-	struct termios options;
-	unsigned char Line[100];
-	int id, Length;
-	struct TGPS *GPS;
-
-	GPS = (struct TGPS *)some_void_ptr;
-
-	printf ("Opening GPS Serial Device %s\n", Config.GPSDevice);
-	
-	// Open serial port
-    if ((fd = open(Config.GPSDevice, O_RDWR | O_NOCTTY | O_NDELAY)) < 0)
-    {
-		printf("Cannot open serial port\n");
-	}
-    fcntl(fd, F_SETFL, 0);
-    tcgetattr(fd, &options);
-    options.c_lflag &= ~ECHO;
-    options.c_cc[VMIN]  = 0;
-    options.c_cc[VTIME] = 10;
-    options.c_cflag &= ~CSTOPB;
-    cfsetispeed(&options, B9600);
-    cfsetospeed(&options, B9600);
-    tcsetattr(fd, TCSAFLUSH, &options);
-
-	Length = 0;
-
-	SetFlightMode(fd, NULL);
-	
-    while (1)
-    {
-        int i;
-		unsigned char Character;
-
-		read(fd, &Character, 1);
-
-        if (Character == '$')
-		{
-			Line[0] = Character;
-			Length = 1;
-		}
-        else if (Length > 90)
-        {
-           	Length = 0;
-        }
-        else if ((Length > 0) && (Character != '\r'))
-        {
-			Line[Length++] = Character;
-            if (Character == '\n')
-            {
-				Line[Length] = '\0';
-                ProcessLine(fd, NULL, GPS, Line, Length);
-				Length = 0;
-            }
-		}
-	}
-}
-
-void *GPSLoop(void *some_void_ptr)
-{
-	if (Config.GPSDevice[0])
-	{
-		printf ("Serial GPS\n");
-		GPSLoopSerial(some_void_ptr);
-	}
-	else
-	{
-		printf ("I2C GPS\n");
-		GPSLoopI2C(some_void_ptr);
-	}
-}
 

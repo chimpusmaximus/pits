@@ -34,6 +34,7 @@ int main(int argc, char **argv)
     bcm2835_gpio_fsel(PIN, BCM2835_GPIO_FSEL_ALT5);
 
     bcm2835_close();
+	
     return 0;
 }
 

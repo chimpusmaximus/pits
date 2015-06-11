@@ -22,7 +22,7 @@ int TimeTillImageCompleted(int Channel)
 	if (Config.Channels[Channel].ImageFP == NULL || 
 	    (Config.Channels[Channel].SSDVTotalRecords == 0))
 	{
-		printf ("Convert image now for channel %d!\n", Channel);
+		// printf ("Convert image now for channel %d!\n", Channel);
 		return 0;
 	}
 
@@ -89,7 +89,7 @@ void FindAndConvertImage(int Channel)
 		// Create SSDV script file
 		if ((fp = fopen(SSDVScriptName, "wt")) != NULL)
 		{
-			fprintf(fp, "ssdv -e -c %s -i %d %s %s\n", Config.Channels[Channel].PayloadID, Config.Channels[Channel].SSDVFileNumber, LargestFileName, Config.Channels[Channel].SSDVFileName);
+			fprintf(fp, "ssdv -e -c %.6s -i %d %s %s\n", Config.Channels[Channel].PayloadID, Config.Channels[Channel].SSDVFileNumber, LargestFileName, Config.Channels[Channel].SSDVFileName);
 			fprintf(fp, "mkdir -p %s/$1\n", SSDVFolder);
 			fprintf(fp, "mv %s/*.jpg %s/$1\n", SSDVFolder, SSDVFolder);
 			fclose(fp);
@@ -139,6 +139,10 @@ void *CameraLoop(void *some_void_ptr)
 						height = Config.Channels[Channel].ImageHeightWhenLow;
 					}
 
+					// SSDV requires dimensions to be multiples of 16 pixels
+					width = (width / 16) * 16;
+					height = (height / 16) * 16;
+					
 					// Create name of file
 					sprintf(filename, "/home/pi/pits/tracker/take_pic_%d", Channel);
 					

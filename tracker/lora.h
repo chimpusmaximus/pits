@@ -81,6 +81,7 @@
 #define NTX2B_ENABLE	0
 #define UBLOX_ENABLE	2
 
-extern char **LoRaModes;
+// extern char **LoRaModes;
 
+void LoadLoRaConfig(FILE *fp, struct TConfig *Config);
 void *LoRaLoop(void *some_void_ptr);

@@ -180,6 +180,8 @@ void make_and_write_freq(FILE *f, UL cycles_per_bit, UL baud, UL lfreq, UL hfreq
 	{
 		// fwrite(&(_sine_table[(phase >> 7) & 0x1FF]), 1, 1, f);
 		int16_t v = _sine_table[(phase >> 7) & 0x1FF] * 0x80 - 0x4000;
+		v *= 1.3;
+		// int16_t v = _sine_table[(phase >> 7) & 0x1FF] * 0x100 - 0x8000;
 		fwrite(&v, 2, 1, f);
 		phase += step;
 	}
@@ -190,35 +192,6 @@ void make_and_write_bit(FILE *f, UL cycles_per_bit, UL baud, UL lfreq, UL hfreq,
 	static int8_t bc = 0;
 	static int8_t High = 0;
 			
-	/*
-	if (Bit)
-	{
-		// Stay with same frequency, but only for a max of 5 in a row
-		bc++;
-	}
-	else
-	{
-		// 0 means swap frequency
-		High = !High;
-		bc = 0;
-	}
-	
-	make_and_write_freq(f, cycles_per_bit, baud, lfreq, hfreq, High);
-
-	if (BitStuffing)
-	{
-		if (bc >= 4)
-		{	
-			High = !High;
-			make_and_write_freq(f, cycles_per_bit, baud, lfreq, hfreq, High);
-			bc = 0;
-		}
-	}
-	else
-	{
-		bc = 0;
-	}
-	*/
 	if(BitStuffing)
 	{
 		if(bc >= 5)
@@ -253,8 +226,6 @@ void make_and_write_byte(FILE *f, UL cycles_per_bit, UL baud, UL lfreq, UL hfreq
 {
 	int i;
 	
-	// printf("%02X ", Character);
-		
 	for (i=0; i<8; i++)
 	{
 		make_and_write_bit(f, cycles_per_bit, baud, lfreq, hfreq, Character & 1, BitStuffing);
@@ -294,13 +265,7 @@ void makeafsk(UL freq, UL baud, UL lfreq, UL hfreq, unsigned char *Message, int 
 	fwrite(m, 1, 44, f);
 	
 	// Write preamble
-	/*
-	for (i=0; i< preamble_length; i++)
-	{
-		make_and_write_freq(f, cycles_per_bit, baud, lfreq, hfreq, 0);
-	}
-	*/
-	
+
 	for (i=0; i<flags_before; i++)
 	{
 		make_and_write_byte(f, cycles_per_bit, baud, lfreq, hfreq, 0x7E, 0);
@@ -340,12 +305,6 @@ void SendAPRS(struct TGPS *GPS)
 	uint8_t *frame;
 	int i, length;
 
-	/*
-	lat = 51.95023;
-	lon = -2.54445;
-	alt = 190;
-	*/
-	
 	Count++;
 	seq++;
 	
@@ -373,6 +332,18 @@ void SendAPRS(struct TGPS *GPS)
 	printf("Length=%d\n\n", length);
 
 	makeafsk(48000, 1200, 1200, 2200, frame, length);
+}
+
+void LoadAPRSConfig(FILE *fp, struct TConfig *Config)
+{
+	// APRS settings
+	ReadString(fp, "APRS_Callsign", -1, Config->APRS_Callsign, sizeof(Config->APRS_Callsign), 0);
+	Config->APRS_ID = ReadInteger(fp, "APRS_ID", -1, 0, 11);
+	Config->APRS_Period = ReadInteger(fp, "APRS_Period", -1, 0, 1);
+	if (*(Config->APRS_Callsign) && Config->APRS_ID && Config->APRS_Period)
+	{
+		printf("APRS enabled for callsign %s:%d every %d minute%s\n", Config->APRS_Callsign, Config->APRS_ID, Config->APRS_Period, Config->APRS_Period > 1 ? "s" : "");
+	}
 }
 
 void *APRSLoop(void *some_void_ptr)
