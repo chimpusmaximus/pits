@@ -1,6 +1,5 @@
 payload=PI_SKY_PLUS
 disable_monitor=N
-#frequency=80
 frequency=434.300
 baud=300
 camera=1
@@ -12,16 +11,15 @@ high_height=480
 image_packets=4
 enable_bmp085=N
 external_temperature=0
-# logging=GPS,Telemetry
-Disable_RTTY=Y
-# gps_source=/home/pi/pits/tracker/flight.txt
+logging=GPS,Telemetry
+Disable_RTTY=N
 
 landing_prediction=N
 cd_area=0.66
 payload_weight=1.0
 prediction_id=XX
 
-#APRS_Callsign=M0RPI
+#APRS_Callsign=callsign
 APRS_ID=11
 APRS_Period=1
 
