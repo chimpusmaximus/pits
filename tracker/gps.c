@@ -391,8 +391,6 @@ void ProcessLine(struct i2c_info *bb, struct TGPS *GPS, char *Buffer, int Count,
 						if (ew == 'W') GPS->Longitude = -GPS->Longitude;
 						GPS->Altitude = altitude;
 						if (GPS->Altitude > GPS->MaximumAltitude) GPS->MaximumAltitude = GPS->Altitude;
-						GPS->Latitude = GPS->Latitude + 51.950279 - 52.251465;
-						GPS->Longitude = GPS->Longitude + 0.092384 - 2.544374;
 					}
 				}
 				
