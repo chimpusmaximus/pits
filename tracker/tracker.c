@@ -61,7 +61,7 @@ void BuildSentence(char *TxLine, int SentenceCounter, struct TGPS *GPS)
     unsigned char c;
 	char TimeBuffer1[12], TimeBuffer2[10], ExtraFields1[20], ExtraFields2[20], ExtraFields3[20];
 	
-	sprintf(TimeBuffer1, "%06.0f", GPS->Time);
+	sprintf(TimeBuffer1, "%06ld", GPS->Time);
 	TimeBuffer2[0] = TimeBuffer1[0];
 	TimeBuffer2[1] = TimeBuffer1[1];
 	TimeBuffer2[2] = ':';
@@ -309,17 +309,11 @@ void SetMTX2Frequency(char *FrequencyString)
 		pullUpDnControl(NTX2B_ENABLE, PUD_OFF);
 		delayMilliseconds (20);
 
-		printf("Write ...\n");
 		write(fd, _mtx2command, strlen(_mtx2command)); 
-		printf("Flush ...\n");
 		tcsetattr(fd, TCSAFLUSH, &options);
-		printf("Delay ...\n");
 		delayMilliseconds (50);
-		printf("Done\n");
 
-		printf("Closing ...\n");
 		close(fd);
-		printf("Closed\n");
 
 		// Switch on the radio
 		delayMilliseconds (100);

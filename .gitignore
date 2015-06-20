@@ -1,6 +1,7 @@
 .dropbox
 desktop.ini
 *.o
+take_pic*
 tracker/tracker
 tracker/download
 tracker/keep
