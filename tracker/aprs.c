@@ -226,6 +226,8 @@ void make_and_write_byte(FILE *f, UL cycles_per_bit, UL baud, UL lfreq, UL hfreq
 {
 	int i;
 	
+	// printf("%02X ", Character);
+		
 	for (i=0; i<8; i++)
 	{
 		make_and_write_bit(f, cycles_per_bit, baud, lfreq, hfreq, Character & 1, BitStuffing);
@@ -242,53 +244,55 @@ void makeafsk(UL freq, UL baud, UL lfreq, UL hfreq, unsigned char *Message, int 
 	FILE *f;
 	int i;
 	
-	f = fopen("aprs.wav","wb");
-	
-	cycles_per_bit = freq / baud;
-	printf ("cycles_per_bit=%d\n", cycles_per_bit);
-	cycles_per_byte = cycles_per_bit * 8;
-	printf ("cycles_per_byte=%d\n", cycles_per_byte);
-
-	preamble_length = 128;
-	postamble_length = 64;
-	flags_before = 32;
-	flags_after = 32;
-
-	// Calculate size of file
-	total_cycles = (cycles_per_byte * (flags_before + message_length + flags_after)) + ((preamble_length + postamble_length) * cycles_per_bit);
-
-	// Make header
-	m = malloc(44);
-	wavhdr(m, freq, total_cycles * 2 + 10);		// * 2 + 10 is new
-	
-	// Write wav header
-	fwrite(m, 1, 44, f);
-	
-	// Write preamble
-
-	for (i=0; i<flags_before; i++)
+	if ((f = fopen("aprs.wav","wb")) != NULL)
 	{
-		make_and_write_byte(f, cycles_per_bit, baud, lfreq, hfreq, 0x7E, 0);
-	}
-	
-	// Create and write actual data
-	for (i=0; i<message_length; i++)
-	{
-		make_and_write_byte(f, cycles_per_bit, baud, lfreq, hfreq, Message[i], 1);
-	}
+		printf("Building APRS packet\n");
+		cycles_per_bit = freq / baud;
+		// printf ("cycles_per_bit=%d\n", cycles_per_bit);
+		cycles_per_byte = cycles_per_bit * 8;
+		// printf ("cycles_per_byte=%d\n", cycles_per_byte);
 
-	for (i=0; i<flags_after; i++)
-	{
-		make_and_write_byte(f, cycles_per_bit, baud, lfreq, hfreq, 0x7E, 0);
-	}
+		preamble_length = 128;
+		postamble_length = 64;
+		flags_before = 32;
+		flags_after = 32;
 
-	// Write postamble
-	for (i=0; i< postamble_length; i++)
-	{
-		make_and_write_freq(f, cycles_per_bit, baud, lfreq, hfreq, 0);
+		// Calculate size of file
+		total_cycles = (cycles_per_byte * (flags_before + message_length + flags_after)) + ((preamble_length + postamble_length) * cycles_per_bit);
+
+		// Make header
+		m = malloc(44);
+		wavhdr(m, freq, total_cycles * 2 + 10);		// * 2 + 10 is new
+		
+		// Write wav header
+		fwrite(m, 1, 44, f);
+		
+		// Write preamble
+		
+		for (i=0; i<flags_before; i++)
+		{
+			make_and_write_byte(f, cycles_per_bit, baud, lfreq, hfreq, 0x7E, 0);
+		}
+		
+		// Create and write actual data
+		for (i=0; i<message_length; i++)
+		{
+			make_and_write_byte(f, cycles_per_bit, baud, lfreq, hfreq, Message[i], 1);
+		}
+
+		for (i=0; i<flags_after; i++)
+		{
+			make_and_write_byte(f, cycles_per_bit, baud, lfreq, hfreq, 0x7E, 0);
+		}
+
+		// Write postamble
+		for (i=0; i< postamble_length; i++)
+		{
+			make_and_write_freq(f, cycles_per_bit, baud, lfreq, hfreq, 0);
+		}
+		
+		fclose(f);
 	}
-	
-	fclose(f);
 }
 
 	
@@ -329,7 +333,7 @@ void SendAPRS(struct TGPS *GPS)
     ax25_base91enc(slng, 4, aprs_lon),
     aprs_alt, stlm, comment, Config.APRS_Callsign, Count);	// , errorstatus,temperature1);
 
-	printf("Length=%d\n\n", length);
+	// printf("Length=%d\n\n", length);
 
 	makeafsk(48000, 1200, 1200, 2200, frame, length);
 }
@@ -340,31 +344,40 @@ void LoadAPRSConfig(FILE *fp, struct TConfig *Config)
 	ReadString(fp, "APRS_Callsign", -1, Config->APRS_Callsign, sizeof(Config->APRS_Callsign), 0);
 	Config->APRS_ID = ReadInteger(fp, "APRS_ID", -1, 0, 11);
 	Config->APRS_Period = ReadInteger(fp, "APRS_Period", -1, 0, 1);
+	Config->APRS_Offset = ReadInteger(fp, "APRS_Offset", -1, 0, 0);
+	Config->APRS_Random = ReadInteger(fp, "APRS_Random", -1, 0, 0);
 	if (*(Config->APRS_Callsign) && Config->APRS_ID && Config->APRS_Period)
 	{
-		printf("APRS enabled for callsign %s:%d every %d minute%s\n", Config->APRS_Callsign, Config->APRS_ID, Config->APRS_Period, Config->APRS_Period > 1 ? "s" : "");
+		printf("APRS enabled for callsign %s:%d every %d minute%s with offset %ds\n", Config->APRS_Callsign, Config->APRS_ID, Config->APRS_Period, Config->APRS_Period > 1 ? "s" : "", Config->APRS_Offset);
 	}
+}
+
+int TimeToSendAPRS(long GPS_Seconds, long APRS_Period, long APRS_Offset)
+{
+	return ((GPS_Seconds + APRS_Period - APRS_Offset) % APRS_Period) <= 1;
 }
 
 void *APRSLoop(void *some_void_ptr)
 {
 	struct TGPS *GPS;
+	long RandomOffset;
 
 	GPS = (struct TGPS *)some_void_ptr;
+	RandomOffset = 0;
 	
     while (1)
 	{
 		if (GPS->Satellites > 3)
 		{
-			printf("Sending APRS message ...\n");
-			
-			SendAPRS(GPS);
-			
-			sleep(60 * Config.APRS_Period);
+			if (TimeToSendAPRS(GPS->Seconds, Config.APRS_Period * 60, Config.APRS_Offset + RandomOffset))
+			{
+				SendAPRS(GPS);
+				
+				RandomOffset = rand() % Config.APRS_Random;
+				
+				sleep(2 + Config.APRS_Random);			// So we don't Tx again almost immediately
+			}
 		}
-		else
-		{
-			sleep(1);
-		}
+		sleep(1);
 	}
 }

@@ -1,0 +1,10 @@
+if [ -e process_image ]
+then
+	./process_image 0 /home/pi/pits/tracker/images/RTTY/13_47_24.jpg
+else
+	cp /home/pi/pits/tracker/images/RTTY/13_47_24.jpg ssdv.jpg
+fi
+ssdv -e -c PISKY -i 1 ssdv.jpg ssdv_0.nxt
+mkdir -p /home/pi/pits/tracker/images/RTTY/$1
+mv /home/pi/pits/tracker/images/RTTY/*.jpg /home/pi/pits/tracker/images/RTTY/$1
+echo DONE > ssdv_done_0

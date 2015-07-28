@@ -12,6 +12,9 @@
 #include <errno.h>
 #include <wiringPiSPI.h>
 #include "misc.h"
+#include <sys/types.h>
+#include <dirent.h>
+#include <string.h>
 
 char Hex(char Character)
 {
@@ -92,20 +95,36 @@ short open_i2c(int address)
 	return fd;
 }
 
+int FileExists(char *filename)
+{
+	struct stat st;
+
+	return stat(filename, &st) == 0;
+}
+
 void StartNewFileIfNeeded(int Channel)
 {
     if (Config.Channels[Channel].ImageFP == NULL)
     {
-		// Not currently sending a file
-		if (Config.Channels[Channel].NextSSDVFileReady)
+		// Not currently sending a file.  Test to see if SSDV file has been marked as complete
+		if (FileExists(Config.Channels[Channel].ssdv_done))
 		{
-			// Script has been created, but possibly not run yet
-			// So just try to open the file
+			// New file should be ready now
 			
-			if ((Config.Channels[Channel].ImageFP = fopen(Config.Channels[Channel].SSDVFileName, "r")) != NULL)
+			// Zap the "done" file and the existing SSDV file
+			remove(Config.Channels[Channel].ssdv_done);
+			remove(Config.Channels[Channel].current_ssdv);
+			
+			// Rename new file to replace that one
+			rename(Config.Channels[Channel].next_ssdv, Config.Channels[Channel].current_ssdv);
+			
+			if ((Config.Channels[Channel].ImageFP = fopen(Config.Channels[Channel].current_ssdv, "rb")) != NULL)
 			{
-				// That workd so let's get the file size so we can monitor progress
+				char filename[100];
+				
+				// That worked so let's get the file size so we can monitor progress
 				fseek(Config.Channels[Channel].ImageFP, 0L, SEEK_END);
+				// printf("%lu bytes\n", ftell(Config.Channels[Channel].ImageFP));
 				Config.Channels[Channel].SSDVTotalRecords = ftell(Config.Channels[Channel].ImageFP) / 256;		// SSDV records are 256 bytes
 				fseek(Config.Channels[Channel].ImageFP, 0L, SEEK_SET);				
 				
@@ -113,7 +132,9 @@ void StartNewFileIfNeeded(int Channel)
 				Config.Channels[Channel].SSDVRecordNumber = 0;
 				
 				// And clear the flag so that the script can be recreated later
-				Config.Channels[Channel].NextSSDVFileReady = 0;
+				// Config.Channels[Channel].NextSSDVFileReady = 0;
+				sprintf(filename, "ssdv_done_%d", Channel);
+				remove(filename);
 			}
 		}
 	}
@@ -242,4 +263,51 @@ void AppendCRC(char *Temp)
 	Temp[Count++] = '\n';  
 	Temp[Count++] = '\0';
 }
+
+int prog_count(char* name)
+{
+    DIR* dir;
+    struct dirent* ent;
+    char buf[512];
+    long  pid;
+    char pname[100] = {0,};
+    char state;
+    FILE *fp=NULL; 
+	int Count=0;
+
+    if (!(dir = opendir("/proc")))
+	{
+        perror("can't open /proc");
+        return 0;
+    }
+
+    while((ent = readdir(dir)) != NULL)
+	{
+        long lpid = atol(ent->d_name);
+        if (lpid < 0)
+            continue;
+        snprintf(buf, sizeof(buf), "/proc/%ld/stat", lpid);
+        fp = fopen(buf, "r");
+
+        if (fp)
+		{
+            if ((fscanf(fp, "%ld (%[^)]) %c", &pid, pname, &state)) != 3 )
+			{
+                printf("fscanf failed \n");
+                fclose(fp);
+                closedir(dir);
+                return 0;
+            }
+			
+            if (!strcmp(pname, name))
+			{
+                Count++;
+            }
+            fclose(fp);
+        }
+    }
+
+	closedir(dir);
 	
+	return Count;
+}

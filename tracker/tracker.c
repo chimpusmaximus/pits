@@ -32,6 +32,10 @@
 #include <math.h>
 #include <pthread.h>
 #include <wiringPi.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <ifaddrs.h>
+#include <sys/statvfs.h>
 #include "gps.h"
 #include "DS18B20.h"
 #include "adc.h"
@@ -101,14 +105,14 @@ void BuildSentence(char *TxLine, int SentenceCounter, struct TGPS *GPS)
 			(GPS->Speed * 13) / 7,
 			GPS->Direction,
 			GPS->Satellites,            
-            GPS->DS18B20Temperature[1-Config.ExternalDS18B20],
+            GPS->DS18B20Temperature[(GPS->DS18B20Count > 1) ? (1-Config.ExternalDS18B20) : 0],
             GPS->BatteryVoltage,
 			ExtraFields1,
 			ExtraFields2,
 			ExtraFields3);
 
 	AppendCRC(TxLine);
-			
+	
     printf("RTTY: %s", TxLine);
 }
 
@@ -132,7 +136,7 @@ speed_t BaudToSpeed(int baud)
 void LoadConfigFile(struct TConfig *Config)
 {
 	FILE *fp;
-	int BaudRate, Channel;
+	int BaudRate;
 	char *filename = "/boot/pisky.txt";
 
 	if ((fp = fopen(filename, "r")) == NULL)
@@ -146,7 +150,7 @@ void LoadConfigFile(struct TConfig *Config)
 	{
 		printf("HDMI/Composite outputs will be disabled\n");
 	}
-
+	
 	ReadBoolean(fp, "Disable_RTTY", -1, 0, &(Config->DisableRTTY));
 	Config->Channels[RTTY_CHANNEL].Enabled = !Config->DisableRTTY;
 	if (Config->DisableRTTY)
@@ -194,19 +198,34 @@ void LoadConfigFile(struct TConfig *Config)
 		Config->SSDVHigh = ReadInteger(fp, "high", -1, 0, 2000);
 		printf ("Image size changes at %dm\n", Config->SSDVHigh);
 		
-		Config->Channels[0].ImageWidthWhenLow = ReadInteger(fp, "low_width", -1, 0, 320);
-		Config->Channels[0].ImageHeightWhenLow = ReadInteger(fp, "low_height", -1, 0, 240);
-		printf ("RTTY Low image size %d x %d pixels\n", Config->Channels[0].ImageWidthWhenLow, Config->Channels[0].ImageHeightWhenLow);
+		Config->Channels[RTTY_CHANNEL].ImageWidthWhenLow = ReadInteger(fp, "low_width", -1, 0, 320);
+		Config->Channels[RTTY_CHANNEL].ImageHeightWhenLow = ReadInteger(fp, "low_height", -1, 0, 240);
+		printf ("RTTY Low image size %d x %d pixels\n", Config->Channels[RTTY_CHANNEL].ImageWidthWhenLow, Config->Channels[0].ImageHeightWhenLow);
 		
-		Config->Channels[0].ImageWidthWhenHigh = ReadInteger(fp, "high_width", -1, 0, 640);
-		Config->Channels[0].ImageHeightWhenHigh = ReadInteger(fp, "high_height", -1, 0, 480);
-		printf ("RTTY High image size %d x %d pixels\n", Config->Channels[0].ImageWidthWhenHigh, Config->Channels[0].ImageHeightWhenHigh);
+		Config->Channels[RTTY_CHANNEL].ImageWidthWhenHigh = ReadInteger(fp, "high_width", -1, 0, 640);
+		Config->Channels[RTTY_CHANNEL].ImageHeightWhenHigh = ReadInteger(fp, "high_height", -1, 0, 480);
+		printf ("RTTY High image size %d x %d pixels\n", Config->Channels[RTTY_CHANNEL].ImageWidthWhenHigh, Config->Channels[0].ImageHeightWhenHigh);
 
-		Config->Channels[0].ImagePackets = ReadInteger(fp, "image_packets", -1, 0, 4);
-		printf ("RTTY: 1 Telemetry packet every %d image packets\n", Config->Channels[0].ImagePackets);
+		Config->Channels[RTTY_CHANNEL].ImagePackets = ReadInteger(fp, "image_packets", -1, 0, 4);
+		printf ("RTTY: 1 Telemetry packet every %d image packets\n", Config->Channels[RTTY_CHANNEL].ImagePackets);
 		
-		Config->Channels[0].ImagePeriod = ReadInteger(fp, "image_period", -1, 0, 60);
-		printf ("RTTY: %d seconds between photographs\n", Config->Channels[0].ImagePeriod);
+		Config->Channels[RTTY_CHANNEL].ImagePeriod = ReadInteger(fp, "image_period", -1, 0, 60);
+		printf ("RTTY: %d seconds between photographs\n", Config->Channels[RTTY_CHANNEL].ImagePeriod);
+
+		// Set up full-size image parameters		
+		Config->Channels[FULL_CHANNEL].ImageWidthWhenLow = ReadInteger(fp, "full_low_width", -1, 0, 640);
+		Config->Channels[FULL_CHANNEL].ImageHeightWhenLow = ReadInteger(fp, "full_low_height", -1, 0, 480);
+		printf ("Full Low image size %d x %d pixels\n", Config->Channels[FULL_CHANNEL].ImageWidthWhenLow, Config->Channels[FULL_CHANNEL].ImageHeightWhenLow);
+		
+		Config->Channels[FULL_CHANNEL].ImageWidthWhenHigh = ReadInteger(fp, "full_high_width", -1, 0, 2592);
+		Config->Channels[FULL_CHANNEL].ImageHeightWhenHigh = ReadInteger(fp, "full_high_height", -1, 0, 1944);
+		printf ("Full High image size %d x %d pixels\n", Config->Channels[FULL_CHANNEL].ImageWidthWhenHigh, Config->Channels[FULL_CHANNEL].ImageHeightWhenHigh);
+
+		Config->Channels[FULL_CHANNEL].ImagePeriod = ReadInteger(fp, "full_image_period", -1, 0, 60);
+		printf ("Full size: %d seconds between photographs\n", Config->Channels[FULL_CHANNEL].ImagePeriod);
+		
+		Config->Channels[FULL_CHANNEL].ImagePackets = 1;
+		Config->Channels[FULL_CHANNEL].Enabled = 1;
 	}
 
 	Config->GPSSource[0] = '\0';
@@ -234,6 +253,8 @@ void LoadConfigFile(struct TConfig *Config)
 		Config->SCL = ReadInteger(fp, "SCL", -1, 0, 0);
 		printf ("I2C SCL overridden to %d\n", Config->SCL);
 	}
+	
+	Config->InfoMessageCount = ReadInteger(fp, "info_messages", -1, 0, -1);
 
 	LoadAPRSConfig(fp, Config);
 	
@@ -395,6 +416,7 @@ void SetNTX2BFrequency(char *FrequencyString)
 	}
 }
 
+
 void SetFrequency(char *Frequency)
 {
 	if (NewBoard())
@@ -412,7 +434,7 @@ int OpenSerialPort(void)
 {
 	int fd;
 
-	fd = open("/dev/ttyAMA0", O_WRONLY | O_NOCTTY | O_NDELAY);
+	fd = open("/dev/ttyAMA0", O_WRONLY | O_NOCTTY);	// O_NDELAY);
 	if (fd >= 0)
 	{
 		/* get the current options */
@@ -438,29 +460,37 @@ int OpenSerialPort(void)
 	return fd;
 }
 
-void SendSentence(char *TxLine)
+void SendSentence(int fd, char *TxLine)
 {
-	int fd;
+	// int fd;
 
 	
-	if ((fd = OpenSerialPort()) >= 0)
+	// if ((fd = OpenSerialPort()) >= 0)
 	{
+		// printf("Sending sentence ...\n");
 		write(fd, TxLine, strlen(TxLine));
-		
-		if (close(fd) < 0)
-		{
-			printf("NOT Sent - error %d\n", errno);
-		}
-		
+
+		// Log now while we're waiting for the serial port, to eliminate or at least reduce downtime whilst logging
 		if (Config.EnableTelemetryLogging)
 		{
 			WriteLog("telemetry.txt", TxLine);
 		}
+		
+		// Wait till those characters get sent
+		tcsetattr(fd, TCSAFLUSH, &options);
+		// printf("Sent\n");
+		
+		// if (close(fd) < 0)
+		// {
+			// printf("NOT Sent - error %d\n", errno);
+		// }
 	}
+	/*
 	else
 	{
 		printf("Failed to open serial port\n");
 	}
+	*/
 	
 }
 
@@ -478,13 +508,15 @@ int SendRTTYImage()
         Count = fread(Buffer, 1, 256, Config.Channels[RTTY_CHANNEL].ImageFP);
         if (Count > 0)
         {
-            printf("RTTY SSDV record %d of %d\r\n", ++Config.Channels[RTTY_CHANNEL].SSDVRecordNumber, Config.Channels[RTTY_CHANNEL].SSDVTotalRecords);
+            printf("RTTY: SSDV record %d of %d\r\n", ++Config.Channels[RTTY_CHANNEL].SSDVRecordNumber, Config.Channels[RTTY_CHANNEL].SSDVTotalRecords);
 
 			Config.Channels[RTTY_CHANNEL].ImagePacketCount++;
 
 			if ((fd = OpenSerialPort()) >= 0)
 			{
+
 				write(fd, Buffer, Count);
+
 				close(fd);
 			}
 
@@ -500,6 +532,44 @@ int SendRTTYImage()
     return SentSomething;
 }
 
+void SendIPAddress(int fd)
+{
+    struct ifaddrs *ifap, *ifa;
+    struct sockaddr_in *sa;
+    char *addr;
+
+    getifaddrs (&ifap);
+    for (ifa = ifap; ifa; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr->sa_family==AF_INET) {
+            sa = (struct sockaddr_in *) ifa->ifa_addr;
+            addr = inet_ntoa(sa->sin_addr);
+			if (strcmp(addr, "127.0.0.1") != 0)
+			{
+				char Sentence[200];
+				
+				sprintf(Sentence, "Interface %s has IP Address: %s\n", ifa->ifa_name, addr);
+				printf(Sentence);
+				SendSentence(fd, Sentence);
+			}
+        }
+    }
+
+    freeifaddrs(ifap);
+}
+
+void SendFreeSpace(int fd)
+{
+	struct statvfs vfs;
+
+	if (statvfs("/home", &vfs) == 0)
+	{
+		char Sentence[200];
+		
+		sprintf(Sentence, "Free SD space = %.1fMB\n", (float)vfs.f_bsize * (float)vfs.f_bfree / (1024 * 1024));
+		printf(Sentence);
+		SendSentence(fd, Sentence);
+	}
+}
 
 int main(void)
 {
@@ -509,6 +579,20 @@ int main(void)
 	struct stat st = {0};
 	struct TGPS GPS;
 	pthread_t PredictionThread, LoRaThread, APRSThread, GPSThread, DS18B20Thread, ADCThread, CameraThread, BMP085Thread, LEDThread;
+	
+	if (prog_count("tracker") > 1)
+	{
+		printf("\nThe tracker program is already running!\n");
+		printf("It is started automatically, with the camera script, when the Pi boots.\n\n");
+		printf("If you just want the tracker software to run, it already is,\n");
+		printf("and its output can be viewed on a monitor attached to a Pi video socket.\n\n");
+		printf("If instead you want to view the tracker output via ssh,\n");
+		printf("then you should first stop it by typing the following command:\n");
+		printf("	sudo killall tracker\n\n");
+		printf("and then restart manually with\n");
+		printf("	sudo ./tracker\n\n");
+		exit(1);
+	}
 	
 	printf("\n\nRASPBERRY PI-IN-THE-SKY FLIGHT COMPUTER\n");
 	printf(    "=======================================\n\n");
@@ -550,6 +634,22 @@ int main(void)
 	{
 		system("/opt/vc/bin/tvservice -off");
 	}
+	
+	if (FileExists("/boot/clear.txt"))
+	{
+		// remove SSDV and other camera images, plus log files
+
+		printf("Removing existing photo files\n");
+		remove("gps.txt");
+		remove("telemetry.txt");
+		remove("/boot/clear.txt");
+		system("rm -rf /home/pi/pits/tracker/download/*.jpg");
+		system("rm -rf /home/pi/pits/tracker/keep/*.jpg");
+	}
+	
+	// Remove any old SSDV files
+	system("rm -f snap*.bin");
+	
 
 	GPS.Time = 0.0;
 	GPS.Longitude = 0.0;
@@ -564,6 +664,7 @@ int main(void)
 	GPS.BMP180Temperature = 0.0;
 	GPS.Pressure = 0.0;
 	GPS.MaximumAltitude = 0.0;
+
 	
 	// Set up I/O
 	if (wiringPiSetup() == -1)
@@ -582,21 +683,20 @@ int main(void)
 		digitalWrite (UBLOX_ENABLE, 0);
 	}
 
-
 	if (!Config.DisableRTTY)
 	{
-		if (*Config.Frequency)
-		{
-			SetFrequency(Config.Frequency);
-		}
-
 		if ((fd = OpenSerialPort()) < 0)
 		{
 			printf("Cannot open serial port - check documentation!\n");
 			exit(1);
 		}
-		close(fd);
-		
+		// close(fd);
+
+		if (*Config.Frequency)
+		{
+			SetFrequency(Config.Frequency);
+		}
+
 		digitalWrite (NTX2B_ENABLE, 1);
 	}
 	
@@ -606,7 +706,7 @@ int main(void)
 	
 	// SPI for ADC (older boards), LoRa add-on board
 	system("gpio load spi");
-	
+
 	// SSDV Folders
 	sprintf(Config.Channels[0].SSDVFolder, "%s/RTTY", SSDVFolder);
 	*Config.Channels[1].SSDVFolder = '\0';										// No folder for APRS images
@@ -630,17 +730,20 @@ int main(void)
 		}	
 	}
 
-	// Set up full-size image parameters
-	Config.Channels[4].ImageWidthWhenLow = 2592;
-	Config.Channels[4].ImageHeightWhenLow = 1944;
-	Config.Channels[4].ImageWidthWhenHigh = 2592;
-	Config.Channels[4].ImageHeightWhenHigh = 1944;
-	Config.Channels[4].ImagePeriod = 60;
-	Config.Channels[4].ImagePackets = 1;
+	// Filenames for SSDV
+	for (i=0; i<5; i++)
+	{
+		sprintf(Config.Channels[i].take_pic, "take_pic_%d", i);
+		sprintf(Config.Channels[i].current_ssdv, "ssdv_%d.bin", i);
+		sprintf(Config.Channels[i].next_ssdv, "ssdv_%d.nxt", i);
+		sprintf(Config.Channels[i].convert_file, "convert_%d", i);
+		sprintf(Config.Channels[i].ssdv_done, "ssdv_done_%d", i);
+	}
 
 	if (pthread_create(&GPSThread, NULL, GPSLoop, &GPS))
 	{
 		fprintf(stderr, "Error creating GPS thread\n");
+		return 1;
 	}
 
 	if (*(Config.APRS_Callsign) && Config.APRS_ID && Config.APRS_Period)
@@ -648,9 +751,10 @@ int main(void)
 		if (pthread_create(&APRSThread, NULL, APRSLoop, &GPS))
 		{
 			fprintf(stderr, "Error creating APRS thread\n");
+			return 1;
 		}
 	}
-
+	
 	if (Config.LoRaDevices[0].InUse || Config.LoRaDevices[1].InUse)
 	{
 		if (pthread_create(&LoRaThread, NULL, LoRaLoop, &GPS))
@@ -662,6 +766,7 @@ int main(void)
 	if (pthread_create(&DS18B20Thread, NULL, DS18B20Loop, &GPS))
 	{
 		fprintf(stderr, "Error creating DS18B20s thread\n");
+		return 1;
 	}
 
 	if (I2CADCExists())
@@ -671,6 +776,7 @@ int main(void)
 		if (pthread_create(&ADCThread, NULL, I2CADCLoop, &GPS))
 		{
 			fprintf(stderr, "Error creating ADC thread\n");
+			return 1;
 		}
 	}
 	else
@@ -680,6 +786,7 @@ int main(void)
 		if (pthread_create(&ADCThread, NULL, ADCLoop, &GPS))
 		{
 			fprintf(stderr, "Error creating ADC thread\n");
+			return 1;
 		}
 	}
 
@@ -688,12 +795,14 @@ int main(void)
 		if (pthread_create(&CameraThread, NULL, CameraLoop, &GPS))
 		{
 			fprintf(stderr, "Error creating camera thread\n");
+			return 1;
 		}
 	}
 
 	if (pthread_create(&LEDThread, NULL, LEDLoop, &GPS))
 	{
 		fprintf(stderr, "Error creating LED thread\n");
+		return 1;
 	}
 	
 	if (Config.EnableBMP085)
@@ -701,9 +810,10 @@ int main(void)
 		if (pthread_create(&BMP085Thread, NULL, BMP085Loop, &GPS))
 		{
 			fprintf(stderr, "Error creating BMP085 thread\n");
+			return 1;
 		}
 	}
-	
+
 	if (Config.EnableLandingPrediction)
 	{
 		if (pthread_create(&PredictionThread, NULL, PredictionLoop, &GPS))
@@ -711,7 +821,19 @@ int main(void)
 			fprintf(stderr, "Error creating prediction thread\n");
 		}
 	}	
-		
+	
+	if (Config.InfoMessageCount < 0)
+	{
+		// Default number depends on baud rate
+		Config.InfoMessageCount = (Config.TxSpeed < B300) ? 2 : 4;
+	}
+	
+	for (i=0; i<Config.InfoMessageCount; i++)
+	{
+		SendIPAddress(fd);
+		SendFreeSpace(fd);
+	}
+
 	while (1)
 	{	
 		if (Config.DisableRTTY)
@@ -721,12 +843,13 @@ int main(void)
 		else
 		{
 			BuildSentence(Sentence, ++Sentence_Counter, &GPS);
-		
-			SendSentence(Sentence);
-		
-			if (Config.Channels[0].ImagePackets > 0)
+			
+			SendSentence(fd, Sentence);
+			
+			if (Config.Channels[RTTY_CHANNEL].ImagePackets > 0)
 			{
-				for (i=0; i< ((GPS.Altitude > Config.SSDVHigh) ? Config.Channels[0].ImagePackets : 1); i++)
+
+				for (i=0; i< ((GPS.Altitude > Config.SSDVHigh) ? Config.Channels[RTTY_CHANNEL].ImagePackets : 1); i++)
 				{
 					SendRTTYImage();
 				}

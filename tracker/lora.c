@@ -372,11 +372,11 @@ int SendLoRaImage(int LoRaChannel)
         Count = fread(Buffer, 1, 256, Config.Channels[LORA_CHANNEL+LoRaChannel].ImageFP);
         if (Count > 0)
         {
-            printf("Record %d, %d bytes\r\n", ++Records, Count);
+            // printf("Record %d, %d bytes\r\n", ++Records, Count);
 
 			Config.Channels[LORA_CHANNEL+LoRaChannel].ImagePacketCount++;
 			
-            printf("LORA SSDV record %d of %d\r\n", ++Config.Channels[LORA_CHANNEL + LoRaChannel].SSDVRecordNumber, Config.Channels[LORA_CHANNEL + LoRaChannel].SSDVTotalRecords);
+            printf("LORA%d: SSDV record %d of %d\r\n", LoRaChannel, ++Config.Channels[LORA_CHANNEL + LoRaChannel].SSDVRecordNumber, Config.Channels[LORA_CHANNEL + LoRaChannel].SSDVTotalRecords);
 			
 			SendLoRaData(LoRaChannel, Buffer+1, 255);
 			
@@ -666,7 +666,7 @@ void LoadLoRaConfig(FILE *fp, struct TConfig *Config)
 		Config->LoRaDevices[0].DIO0 = 6;
 		Config->LoRaDevices[0].DIO5 = 5;
 		
-		Config->LoRaDevices[1].DIO0 = 31;
+		Config->LoRaDevices[1].DIO0 = 27;		// Earlier prototypes = 31
 		Config->LoRaDevices[1].DIO5 = 26;
 	}
 	else
@@ -984,7 +984,7 @@ void *LoRaLoop(void *some_void_ptr)
 				SetLoRaParameters(LoRaChannel, EXPLICIT_MODE, ERROR_CODING_4_8, BANDWIDTH_41K7, SPREADING_11, 0);	// 0x08);
 
 				PacketLength = BuildLoRaCall(Sentence, LoRaChannel);
-				printf("LoRa%d: %s", LoRaChannel, Sentence);
+				printf("LORA%d: %s", LoRaChannel, Sentence);
 									
 				SendLoRaData(LoRaChannel, Sentence, PacketLength);		
 				
@@ -997,7 +997,7 @@ void *LoRaLoop(void *some_void_ptr)
 			{
 				StartNewFileIfNeeded(LORA_CHANNEL + LoRaChannel);
 				
-				MaxImagePackets = (GPS->Altitude > Config.SSDVHigh) ? Config.Channels[LORA_CHANNEL+LoRaChannel].ImagePackets : 1;
+				MaxImagePackets = ((GPS->Altitude > Config.SSDVHigh) || (Config.Channels[LORA_CHANNEL+LoRaChannel].BaudRate > 2000)) ? Config.Channels[LORA_CHANNEL+LoRaChannel].ImagePackets : 1;
 				
 				if ((Config.Channels[LORA_CHANNEL+LoRaChannel].ImageFP == NULL) || (Config.Channels[LORA_CHANNEL+LoRaChannel].ImagePacketCount >= MaxImagePackets))
 				{
@@ -1013,7 +1013,7 @@ void *LoRaLoop(void *some_void_ptr)
 					else
 					{
 						PacketLength = BuildLoRaSentence(Sentence, LoRaChannel, GPS);
-						printf("LoRa%d: %s", LoRaChannel, Sentence);
+						printf("LORA%d: %s", LoRaChannel, Sentence);
 					}
 									
 					SendLoRaData(LoRaChannel, Sentence, PacketLength);		
@@ -1025,7 +1025,7 @@ void *LoRaLoop(void *some_void_ptr)
 				{
 					// Image packet
 					
-					printf("LoRa%d: Send image packet\n", LoRaChannel);
+					// printf("LoRa%d: Send image packet\n", LoRaChannel);
 					SendLoRaImage(LoRaChannel);
 				}
 			}

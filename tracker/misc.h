@@ -61,28 +61,37 @@ struct TChannel
 	int ImagePeriod;						// Time in seconds between photographs
 	int	TimeSinceLastImage;
 	unsigned int BaudRate;
-	char SSDVFileName[200];
+	char take_pic[100];
+	char current_ssdv[100];
+	char next_ssdv[100];
+	char convert_file[100];
+	char ssdv_done[100];
 	FILE *ImageFP;
 	int SSDVRecordNumber;
 	int SSDVTotalRecords;
-	int NextSSDVFileReady;
+	// int NextSSDVFileReady;
 	int SSDVFileNumber;
 	int ImagesRequested;
 };
 
 #define RTTY_CHANNEL 0
 #define APRS_CHANNEL 1
-#define LORA_CHANNEL 2
-
+#define LORA_CHANNEL 2		// 2 for LoRa CE0 and 3 for LoRa CE1
+#define FULL_CHANNEL 4
 
 struct TConfig
 {
+	// Misc settings
 	int DisableMonitor;
-	int Camera;
+	int InfoMessageCount;
+	
+	// Camera
+	int Camera;	
 	int SSDVHigh;
+	
+	// Extra devices
 	int EnableBMP085;
 	int ExternalDS18B20;
-	
 	// Logging
 	int EnableGPSLogging;
 	int EnableTelemetryLogging;
@@ -90,7 +99,7 @@ struct TConfig
 	// LEDs
 	int LED_OK;
 	int LED_Warn;
-
+	
 	// GPS Settings
 	int SDA;
 	int SCL;
@@ -99,13 +108,15 @@ struct TConfig
 	int DisableRTTY;
 	char Frequency[8];
 	speed_t TxSpeed;
-	
-	// APRS section
-	char APRS_Callsign[8];
+
+	// APRS Settings
+	char APRS_Callsign[16];
 	int APRS_ID;
-	int APRS_Period;	
-		
-	// LoRa section
+	int APRS_Period;
+	int APRS_Offset;
+	int APRS_Random;
+	
+	// LoRa Settings
 	struct TLoRaDevice LoRaDevices[2];
 
 	// Radio channels
@@ -126,9 +137,11 @@ extern struct TConfig Config;
 char Hex(char Character);
 void WriteLog(char *FileName, char *Buffer);
 short open_i2c(int address);
+int FileExists(char *filename);
 int ReadBooleanFromString(FILE *fp, char *keyword, char *searchword);
 int ReadBoolean(FILE *fp, char *keyword, int Channel, int NeedValue, int *Result);
 void ReadString(FILE *fp, char *keyword, int Channel, char *Result, int Length, int NeedValue);
 int ReadInteger(FILE *fp, char *keyword, int Channel, int NeedValue, int DefaultValue);
 double ReadFloat(FILE *fp, char *keyword, int Channel, int NeedValue, double DefaultValue);
 void AppendCRC(char *Temp);
+
