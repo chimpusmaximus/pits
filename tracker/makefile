@@ -1,5 +1,5 @@
-tracker: tracker.o gps.o misc.o DS18B20.o adc.o adc_i2c.o snapper.o led.o bmp085.o aprs.o lora.o prediction.o
-	cc -o tracker tracker.o gps.o misc.o DS18B20.o adc.o adc_i2c.o snapper.o led.o bmp085.o aprs.o  lora.o prediction.o -lm -lwiringPi -lwiringPiDev -pthread
+tracker: tracker.o gps.o misc.o DS18B20.o adc.o adc_i2c.o snapper.o led.o bmp085.o aprs.o lora.o prediction.o rx100.o
+	cc -o tracker tracker.o gps.o misc.o DS18B20.o adc.o adc_i2c.o snapper.o led.o bmp085.o aprs.o  lora.o prediction.o rx100.o -lm -lwiringPi -lwiringPiDev -pthread
 
 
 tracker.o: tracker.c gps.h misc.h DS18B20.h adc.h adc_i2c.h bmp085.h lora.h aprs.h prediction.h
@@ -37,4 +37,6 @@ lora.o: lora.c lora.h misc.h gps.h
 
 prediction.o: prediction.c prediction.h misc.h gps.h
 	gcc -c -pthread prediction.c
-	
+
+rx100.o: rx100.c rx100.h misc.h
+	gcc -c -pthread rx100.c
