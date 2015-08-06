@@ -47,6 +47,7 @@
 #include "aprs.h"
 #include "lora.h"
 #include "prediction.h"
+#include "rx100.h"
 
 struct TConfig Config;
 
@@ -578,7 +579,7 @@ int main(void)
 	char Sentence[100], Command[100];
 	struct stat st = {0};
 	struct TGPS GPS;
-	pthread_t PredictionThread, LoRaThread, APRSThread, GPSThread, DS18B20Thread, ADCThread, CameraThread, BMP085Thread, LEDThread;
+	pthread_t PredictionThread, LoRaThread, APRSThread, GPSThread, DS18B20Thread, ADCThread, CameraThread, BMP085Thread, LEDThread, RX100Thread;
 	
 	if (prog_count("tracker") > 1)
 	{
@@ -832,6 +833,12 @@ int main(void)
 	{
 		SendIPAddress(fd);
 		SendFreeSpace(fd);
+	}
+	
+	if (pthread_create(&RX100Thread, NULL, RX100Loop, &GPS))
+	{
+		fprintf(stderr, "Error creating RX100 thread\n");
+		return 1;
 	}
 
 	while (1)
